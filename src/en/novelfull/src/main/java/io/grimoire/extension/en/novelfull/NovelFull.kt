@@ -19,7 +19,7 @@ import org.jsoup.nodes.Element
     name = "NovelFull",
     lang = "en",
     baseUrl = "https://novelfull.com",
-    versionCode = 1,
+    versionCode = 2,
 )
 class NovelFull : ParsedHttpSource(), PaginatedSource {
 
