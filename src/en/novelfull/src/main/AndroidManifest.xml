@@ -6,7 +6,8 @@
     <application
         android:allowBackup="false"
         android:hasCode="true"
-        android:label="Grimoire: NovelFull">
+        android:label="NovelFull"
+        android:icon="@mipmap/ic_launcher">
         <meta-data
             android:name="grimoire.extension"
             android:value="true" />
