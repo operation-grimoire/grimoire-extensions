@@ -6,7 +6,10 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.ParsedHttpSource
+import io.grimoire.api.source.PaginatedSource
 import io.grimoire.api.source.SourceInfo
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -18,7 +21,7 @@ import org.jsoup.nodes.Element
     baseUrl = "https://novelfull.com",
     versionCode = 1,
 )
-class NovelFull : ParsedHttpSource() {
+class NovelFull : ParsedHttpSource(), PaginatedSource {
 
     override val id = 1L
     override val name = "NovelFull"
@@ -83,6 +86,12 @@ class NovelFull : ParsedHttpSource() {
         index = index,
         text = element.text(),
     )
+
+    override suspend fun getChapterList(novel: Novel, page: Int): List<Chapter> =
+        withContext(Dispatchers.IO) {
+            val url = "${resolveUrl(novel.url)}?page=$page"
+            chapterListParse(client.newCall(GET(url)).execute())
+        }
 
     override fun getFilterList() = emptyList<Filter<*>>()
 
