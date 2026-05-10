@@ -12,6 +12,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
 
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +29,9 @@ jobs:
 
       - name: Build release APKs
         run: ./gradlew assembleRelease
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sign APKs
         env:
