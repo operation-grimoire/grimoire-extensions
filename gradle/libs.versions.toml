@@ -1,0 +1,10 @@
+[versions]
+agp = "9.2.1"
+extensionsApi = "0.1.0-SNAPSHOT"
+
+[libraries]
+grimoire-extensions-api = { group = "io.grimoire", name = "extensions-api", version.ref = "extensionsApi" }
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }
+android-application = { id = "com.android.application", version.ref = "agp" }

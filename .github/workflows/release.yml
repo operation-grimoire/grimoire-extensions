@@ -1,0 +1,78 @@
+name: Build & Release Extensions
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Grant gradlew permission
+        run: chmod +x gradlew
+
+      - name: Build release APKs
+        run: ./gradlew assembleRelease
+
+      - name: Sign APKs
+        env:
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "${{ secrets.SIGNING_KEY }}" | base64 -d > keystore.jks
+          BUILD_TOOLS=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner"
+
+          for apk in $(find src -path "*/build/outputs/apk/release/*-unsigned.apk"); do
+            out="${apk/-unsigned/}"
+            "$APKSIGNER" sign \
+              --ks keystore.jks \
+              --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass pass:"$KEY_STORE_PASSWORD" \
+              --key-pass pass:"$KEY_PASSWORD" \
+              --out "$out" \
+              "$apk"
+            echo "Signed: $out"
+          done
+
+      - name: Collect APKs
+        run: |
+          mkdir -p repo
+          for dir in src/*/*; do
+            [ -d "$dir" ] || continue
+            lang=$(basename "$(dirname "$dir")")
+            name=$(basename "$dir")
+            apk=$(find "$dir/build/outputs/apk/release" -name "*-release.apk" ! -name "*-unsigned*" 2>/dev/null | head -1)
+            [ -n "$apk" ] && cp "$apk" "repo/${lang}-${name}.apk"
+          done
+
+      - name: Generate index.json
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/latest
+        run: python3 scripts/generate_index.py
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Extension Repository
+          body: Auto-generated on every push to main.
+          files: |
+            repo/*.apk
+            index.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
