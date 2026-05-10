@@ -29,11 +29,11 @@ class NovelFull : ParsedHttpSource() {
     override fun popularNovelsRequest(page: Int): Request =
         GET("$baseUrl/most-popular?page=$page")
 
-    override fun popularNovelsSelector() = "#list-page .row"
+    override fun popularNovelsSelector() = ".list-truyen .row:has(.truyen-title)"
 
     override fun popularNovelsFromElement(element: Element) = Novel(
-        url = element.selectFirst("h3.truyen-title a")!!.attr("href"),
-        title = element.selectFirst("h3.truyen-title a")!!.text(),
+        url = element.selectFirst(".truyen-title a")!!.attr("href"),
+        title = element.selectFirst(".truyen-title a")!!.text(),
         thumbnailUrl = element.selectFirst("img.cover")?.absUrl("src"),
     )
 
