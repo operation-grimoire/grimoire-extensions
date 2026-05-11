@@ -3,15 +3,15 @@ plugins {
 }
 
 android {
-    namespace = "io.grimoire.extension.en.novelfull"
+    namespace = "io.grimoire.extension.en.novelbuddy"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "io.grimoire.extension.en.novelfull"
+        applicationId = "io.grimoire.extension.en.novelbuddy"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.0.4"
+        versionCode = 1
+        versionName = "1.0.0"
     }
 
     compileOptions {
