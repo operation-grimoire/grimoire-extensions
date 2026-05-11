@@ -163,6 +163,7 @@ jobs:
             Updated ${{ needs.detect.outputs.changed_count }} extension(s) in this run.
           files: |
             repo/*.apk
+            repo/*.png
             index.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
