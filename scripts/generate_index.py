@@ -3,6 +3,7 @@
 Generates index.json consumed by the Grimoire app's extension browser.
 - pkg / versionCode / versionName: from build.gradle.kts (APK metadata)
 - name / lang / baseUrl: from @SourceInfo annotation in Kotlin source
+- iconUrl: highest-density mipmap launcher icon copied alongside the APK
 
 Merges over any existing index.json published at INDEX_URL so extensions that
 weren't rebuilt this run retain their previous entry.
@@ -10,6 +11,7 @@ weren't rebuilt this run retain their previous entry.
 import json
 import os
 import re
+import shutil
 import sys
 import urllib.request
 from pathlib import Path
@@ -17,6 +19,10 @@ from pathlib import Path
 REPO_URL = os.environ.get("REPO_URL", "").rstrip("/")
 INDEX_URL = os.environ.get("INDEX_URL", "").strip()
 ROOT = Path(__file__).parent.parent
+
+# Highest to lowest density — we publish the best available so the app can
+# scale down as needed.
+ICON_DENSITIES = ("xxxhdpi", "xxhdpi", "xhdpi", "hdpi", "mdpi")
 
 
 def fetch_published() -> list:
@@ -67,6 +73,15 @@ def parse_source_info(ext_dir: Path) -> dict:
     raise ValueError(f"No @SourceInfo annotation found under {ext_dir}")
 
 
+def find_icon(ext_dir: Path) -> Path | None:
+    res = ext_dir / "src" / "main" / "res"
+    for density in ICON_DENSITIES:
+        icon = res / f"mipmap-{density}" / "ic_launcher.png"
+        if icon.exists():
+            return icon
+    return None
+
+
 by_pkg = {e["pkg"]: e for e in fetch_published() if "pkg" in e}
 errors = 0
 updated = 0
@@ -106,6 +121,16 @@ for lang_dir in sorted((ROOT / "src").iterdir()):
             "apk": apk_name,
             "url": f"{REPO_URL}/{apk_name}",
         }
+
+        icon_src = find_icon(ext_dir)
+        if icon_src is not None:
+            icon_name = f"{lang}-{ext}.png"
+            shutil.copyfile(icon_src, ROOT / "repo" / icon_name)
+            entry["icon"] = icon_name
+            entry["iconUrl"] = f"{REPO_URL}/{icon_name}"
+        else:
+            print(f"  [warn] {lang}/{ext}: no launcher icon found")
+
         by_pkg[gradle["pkg"]] = entry
         updated += 1
         print(f"  [{lang}] {source['name']} ({gradle['pkg']}) v{gradle['versionName']} code={gradle['versionCode']}")
