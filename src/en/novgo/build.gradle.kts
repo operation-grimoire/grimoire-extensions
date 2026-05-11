@@ -3,15 +3,15 @@ plugins {
 }
 
 android {
-    namespace = "io.grimoire.extension.en.novelbuddy"
+    namespace = "io.grimoire.extension.en.novgo"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "io.grimoire.extension.en.novelbuddy"
+        applicationId = "io.grimoire.extension.en.novgo"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 1
+        versionName = "1.0.0"
     }
 
     compileOptions {

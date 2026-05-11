@@ -94,7 +94,7 @@ class NovelBuddy : HttpSource() {
                 chapterNumber = ch.optString("chap").toFloatOrNull() ?: -1f,
                 uploadDate = ch.optLong("updatedAt", 0L) * 1000L,
             )
-        }
+        }.reversed()
     }
 
     // Page list — parse __NEXT_DATA__ initialChapter.content HTML into pages
