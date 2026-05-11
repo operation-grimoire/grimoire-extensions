@@ -9,6 +9,11 @@ on:
         description: "Extensions per parallel build job"
         required: false
         default: "4"
+      force_all:
+        description: "Rebuild every extension regardless of versionCode"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release
@@ -23,12 +28,17 @@ jobs:
       changed_count: ${{ steps.scan.outputs.changed_count }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Detect version-bumped extensions
         id: scan
         env:
           INDEX_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/latest/index.json
           CHUNK_SIZE: ${{ inputs.chunk_size || '4' }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+          FORCE_ALL: ${{ inputs.force_all || 'false' }}
         run: python3 scripts/detect_changes.py
 
       - name: Summary

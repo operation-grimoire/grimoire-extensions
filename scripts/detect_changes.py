@@ -11,6 +11,7 @@ Outputs (GITHUB_OUTPUT, when set):
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.request
 from pathlib import Path
@@ -18,6 +19,10 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 INDEX_URL = os.environ.get("INDEX_URL", "").strip()
 CHUNK_SIZE = max(1, int(os.environ.get("CHUNK_SIZE", "4")))
+BEFORE_SHA = os.environ.get("BEFORE_SHA", "").strip()
+AFTER_SHA = os.environ.get("AFTER_SHA", "").strip() or "HEAD"
+FORCE_ALL = os.environ.get("FORCE_ALL", "").strip().lower() == "true"
+ZERO_SHA = "0" * 40
 
 
 def fetch_published() -> dict:
@@ -33,6 +38,27 @@ def fetch_published() -> dict:
     return {e["pkg"]: e for e in data if "pkg" in e}
 
 
+def lib_changed() -> bool:
+    """True if any file under lib/ changed between BEFORE_SHA and AFTER_SHA."""
+    if not BEFORE_SHA or BEFORE_SHA == ZERO_SHA:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{BEFORE_SHA}..{AFTER_SHA}", "--", "lib/"],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"[warn] could not diff lib/ ({e}); skipping lib-change detection", file=sys.stderr)
+        return False
+    files = [l for l in result.stdout.splitlines() if l.strip()]
+    if files:
+        print(f"[info] lib/ changed in {BEFORE_SHA[:7]}..{AFTER_SHA[:7]}:", file=sys.stderr)
+        for f in files:
+            print(f"  {f}", file=sys.stderr)
+        return True
+    return False
+
+
 def parse_gradle(path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     pkg = re.search(r'applicationId\s*=\s*"([^"]+)"', text)
@@ -45,6 +71,9 @@ def parse_gradle(path: Path) -> dict:
 
 def main() -> int:
     published = fetch_published()
+    force = FORCE_ALL or lib_changed()
+    if FORCE_ALL:
+        print("[info] FORCE_ALL=true; rebuilding every extension", file=sys.stderr)
     changed = []
 
     for lang_dir in sorted((ROOT / "src").iterdir()):
@@ -57,11 +86,13 @@ def main() -> int:
             info = parse_gradle(gradle)
             old = published.get(info["pkg"])
             old_vc = old["versionCode"] if old else None
-            if old_vc is None or info["versionCode"] > old_vc:
+            bumped = old_vc is None or info["versionCode"] > old_vc
+            if bumped or force:
                 changed.append({
                     "module": f"{lang_dir.name}-{ext_dir.name}",
                     "previousVersionCode": old_vc,
                     "versionCode": info["versionCode"],
+                    "reason": "version-bump" if bumped else "lib-change",
                 })
 
     chunks = [changed[i:i + CHUNK_SIZE] for i in range(0, len(changed), CHUNK_SIZE)]
@@ -78,7 +109,7 @@ def main() -> int:
     print(f"changed extensions: {len(changed)}", file=sys.stderr)
     for c in changed:
         prev = "new" if c["previousVersionCode"] is None else c["previousVersionCode"]
-        print(f"  {c['module']}: {prev} -> {c['versionCode']}", file=sys.stderr)
+        print(f"  {c['module']}: {prev} -> {c['versionCode']} ({c['reason']})", file=sys.stderr)
     print(f"chunks of size {CHUNK_SIZE}: {len(chunks)}", file=sys.stderr)
 
     out_path = os.environ.get("GITHUB_OUTPUT")
