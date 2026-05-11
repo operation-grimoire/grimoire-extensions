@@ -4,18 +4,49 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      chunk_size:
+        description: "Extensions per parallel build job"
+        required: false
+        default: "4"
 
 concurrency:
   group: release
   cancel-in-progress: true
 
 jobs:
-  build:
+  detect:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: read
+    outputs:
+      matrix: ${{ steps.scan.outputs.matrix }}
+      has_changes: ${{ steps.scan.outputs.has_changes }}
+      changed_count: ${{ steps.scan.outputs.changed_count }}
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Detect version-bumped extensions
+        id: scan
+        env:
+          INDEX_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/latest/index.json
+          CHUNK_SIZE: ${{ inputs.chunk_size || '4' }}
+        run: python3 scripts/detect_changes.py
+
+      - name: Summary
+        run: |
+          echo "changed_count=${{ steps.scan.outputs.changed_count }}"
+          echo "has_changes=${{ steps.scan.outputs.has_changes }}"
+          echo "matrix=${{ steps.scan.outputs.matrix }}"
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -24,14 +55,22 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - uses: gradle/actions/setup-gradle@v4
+
       - name: Grant gradlew permission
         run: chmod +x gradlew
 
-      - name: Build release APKs
-        run: ./gradlew assembleRelease
+      - name: Build release APKs (chunk ${{ matrix.chunk }})
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          targets=""
+          for m in ${{ matrix.modules }}; do
+            targets="$targets $m:assembleRelease"
+          done
+          echo "Building:$targets"
+          ./gradlew $targets
 
       - name: Sign APKs
         env:
@@ -54,21 +93,54 @@ jobs:
               "$apk"
             echo "Signed: $out"
           done
+          rm -f keystore.jks
 
       - name: Collect APKs
         run: |
           mkdir -p repo
-          for dir in src/*/*; do
-            [ -d "$dir" ] || continue
-            lang=$(basename "$(dirname "$dir")")
-            name=$(basename "$dir")
-            apk=$(find "$dir/build/outputs/apk/release" -name "*-release.apk" ! -name "*-unsigned*" 2>/dev/null | head -1)
-            [ -n "$apk" ] && cp "$apk" "repo/${lang}-${name}.apk"
+          for m in ${{ matrix.modules }}; do
+            # ":en-novelfull" -> "en/novelfull"
+            mod="${m#:}"
+            lang="${mod%%-*}"
+            name="${mod#${lang}-}"
+            apk=$(find "src/$lang/$name/build/outputs/apk/release" -name "*-release.apk" ! -name "*-unsigned*" 2>/dev/null | head -1)
+            if [ -z "$apk" ]; then
+              echo "::error::No signed APK for $mod"
+              exit 1
+            fi
+            cp "$apk" "repo/${lang}-${name}.apk"
+            echo "Collected: repo/${lang}-${name}.apk"
           done
 
-      - name: Generate index.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apks-chunk-${{ matrix.chunk }}
+          path: repo/*.apk
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: [detect, build]
+    if: needs.detect.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: repo
+          pattern: apks-chunk-*
+          merge-multiple: true
+
+      - name: List collected APKs
+        run: ls -lh repo/
+
+      - name: Generate merged index.json
         env:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/latest
+          INDEX_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/latest/index.json
         run: python3 scripts/generate_index.py
 
       - name: Release
@@ -76,7 +148,9 @@ jobs:
         with:
           tag_name: latest
           name: Extension Repository
-          body: Auto-generated on every push to main.
+          body: |
+            Auto-generated on every push to main.
+            Updated ${{ needs.detect.outputs.changed_count }} extension(s) in this run.
           files: |
             repo/*.apk
             index.json
