@@ -7,6 +7,8 @@ import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
 import io.grimoire.api.source.SourceInfo
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.Response
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -133,7 +135,7 @@ class NovelBuddy : HttpSource() {
 
     override fun getFilterList(): List<Filter<*>> = listOf(GenreFilter(loadedGenres))
 
-    override suspend fun fetchFilterOptions(): List<Filter<*>> {
+    override suspend fun fetchFilterOptions(): List<Filter<*>> = withContext(Dispatchers.IO) {
         val body = client.newCall(GET("$apiBase/genres")).execute().use {
             it.body!!.string()
         }
@@ -144,7 +146,7 @@ class NovelBuddy : HttpSource() {
                 g.getString("name") to g.getString("slug")
             }
         } else emptyList()
-        return getFilterList()
+        getFilterList()
     }
 
     private class GenreFilter(genres: List<Pair<String, String>>) : Filter.Select<String>(
