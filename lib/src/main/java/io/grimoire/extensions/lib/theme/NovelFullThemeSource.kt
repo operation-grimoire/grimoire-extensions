@@ -9,8 +9,10 @@ import io.grimoire.api.network.ParsedHttpSource
 import io.grimoire.api.source.PaginatedSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URLEncoder
 
 abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
 
@@ -34,8 +36,19 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
     override fun latestUpdatesFromElement(element: Element) = popularNovelsFromElement(element)
     override fun latestUpdatesNextPageSelector() = popularNovelsNextPageSelector()
 
-    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>) =
-        GET("$baseUrl/search?keyword=$query&page=$page")
+    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): okhttp3.Request {
+        val genre = filters.filterIsInstance<GenreFilter>().firstOrNull()
+            ?.let { it.values.getOrNull(it.state) }
+            ?.takeIf { it.isNotEmpty() && !it.equals(ANY, ignoreCase = true) }
+        val completedOnly = filters.filterIsInstance<StatusFilter>().firstOrNull()?.state == 1
+
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        return when {
+            genre != null -> GET("$baseUrl/genre/${URLEncoder.encode(genre, "UTF-8")}?page=$page")
+            completedOnly -> GET("$baseUrl/completed-novel?page=$page")
+            else -> GET("$baseUrl/search?keyword=$encoded&page=$page")
+        }
+    }
 
     override fun searchNovelsSelector() = popularNovelsSelector()
     override fun searchNovelsFromElement(element: Element) = popularNovelsFromElement(element)
@@ -72,7 +85,35 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
             chapterListParse(client.newCall(GET("${resolveUrl(novel.url)}?page=$page")).execute())
         }
 
-    override fun getFilterList() = emptyList<Filter<*>>()
+    private var loadedGenres: List<String> = emptyList()
+
+    override val hasDynamicFilters: Boolean = true
+
+    override fun getFilterList(): List<Filter<*>> = listOf(
+        Filter.Header("Filters apply when searching"),
+        StatusFilter(),
+        GenreFilter(loadedGenres),
+    )
+
+    override suspend fun fetchFilterOptions(): List<Filter<*>> = withContext(Dispatchers.IO) {
+        val body = client.newCall(GET(baseUrl)).execute().use { it.body?.string().orEmpty() }
+        val doc = Jsoup.parse(body, baseUrl)
+        loadedGenres = doc.select("a[href*=/genre/]")
+            .map { it.text().trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .sorted()
+        getFilterList()
+    }
+
+    private class StatusFilter : Filter.Select<String>("Status", arrayOf("Any", "Completed only"))
+
+    private class GenreFilter(genres: List<String>) :
+        Filter.Select<String>("Genre", (listOf(ANY) + genres).toTypedArray())
+
+    companion object {
+        private const val ANY = "Any"
+    }
 
     private fun String?.toNovelStatus() = when {
         this == null -> NovelStatus.UNKNOWN
