@@ -90,7 +90,6 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
     override val hasDynamicFilters: Boolean = true
 
     override fun getFilterList(): List<Filter<*>> = listOf(
-        Filter.Header("Filters apply when searching"),
         StatusFilter(),
         GenreFilter(loadedGenres),
     )
@@ -98,11 +97,13 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
     override suspend fun fetchFilterOptions(): List<Filter<*>> = withContext(Dispatchers.IO) {
         val body = client.newCall(GET(baseUrl)).execute().use { it.body?.string().orEmpty() }
         val doc = Jsoup.parse(body, baseUrl)
-        loadedGenres = doc.select("a[href*=/genre/]")
+        // The full canonical genre list lives in the homepage sidebar `.list-cat`.
+        // Other `/genre/` links on the page are per-novel badges (a small subset)
+        // and would also leak a blank from icon-only anchors.
+        loadedGenres = doc.select(".list-cat a[href*=/genre/]")
             .map { it.text().trim() }
-            .filter { it.isNotEmpty() }
+            .filter { it.isNotBlank() }
             .distinct()
-            .sorted()
         getFilterList()
     }
 
