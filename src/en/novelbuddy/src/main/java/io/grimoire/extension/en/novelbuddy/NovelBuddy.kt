@@ -11,7 +11,7 @@ import okhttp3.Response
 import org.json.JSONObject
 import org.jsoup.Jsoup
 
-@SourceInfo(id = 2L, name = "NovelBuddy", lang = "en", baseUrl = "https://novelbuddy.com", versionCode = 1)
+@SourceInfo(id = 2L, name = "NovelBuddy", lang = "en", baseUrl = "https://novelbuddy.com", versionCode = 3)
 class NovelBuddy : HttpSource() {
 
     override val id = 2L
@@ -20,6 +20,11 @@ class NovelBuddy : HttpSource() {
     override val baseUrl = "https://novelbuddy.com"
 
     private val apiBase = "https://api.novelbuddy.com"
+
+    // name -> slug for the genre filter. Populated by fetchFilterOptions.
+    private var loadedGenres: List<Pair<String, String>> = emptyList()
+
+    override val hasDynamicFilters: Boolean = true
 
     // Popular — GET /popular?page=N (default request matches site URL)
 
@@ -36,15 +41,30 @@ class NovelBuddy : HttpSource() {
     override suspend fun latestUpdatesParse(response: Response): List<Novel> =
         popularNovelsParse(response)
 
-    // Search — JSON API endpoint
+    // Search — JSON API when only a query is supplied, otherwise the site's
+    // own /genres/<slug> listing page (the search API ignores genre params).
 
-    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>) =
-        GET("$apiBase/titles/search?q=${query.trim()}&page=$page&limit=24")
+    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): okhttp3.Request {
+        val genreSlug = filters.filterIsInstance<GenreFilter>().firstOrNull()
+            ?.let { it.slugs.getOrNull(it.state) }
+            ?.takeIf { it.isNotEmpty() }
+        return when {
+            genreSlug != null -> GET("$baseUrl/genres/$genreSlug?page=$page")
+            else -> GET("$apiBase/titles/search?q=${query.trim()}&page=$page&limit=24")
+        }
+    }
 
     override suspend fun searchNovelsParse(response: Response): List<Novel> {
-        val json = JSONObject(response.body!!.string())
-        val items = json.optJSONObject("data")?.optJSONArray("items") ?: return emptyList()
-        return (0 until items.length()).map { itemToNovel(items.getJSONObject(it)) }
+        val body = response.body!!.string()
+        // /genres/<slug> serves HTML; /titles/search returns JSON.
+        return if (body.trimStart().startsWith("{")) {
+            val data = JSONObject(body).optJSONObject("data") ?: return emptyList()
+            val items = data.optJSONArray("items") ?: return emptyList()
+            (0 until items.length()).map { itemToNovel(items.getJSONObject(it)) }
+        } else {
+            val items = nextDataPageProps(body).optJSONArray("items") ?: return emptyList()
+            (0 until items.length()).map { itemToNovel(items.getJSONObject(it)) }
+        }
     }
 
     // Novel details — parse __NEXT_DATA__ from novel page HTML
@@ -111,7 +131,33 @@ class NovelBuddy : HttpSource() {
             }
     }
 
-    override fun getFilterList() = emptyList<Filter<*>>()
+    override fun getFilterList(): List<Filter<*>> = listOf(GenreFilter(loadedGenres))
+
+    override suspend fun fetchFilterOptions(): List<Filter<*>> {
+        val body = client.newCall(GET("$apiBase/genres")).execute().use {
+            it.body!!.string()
+        }
+        val items = JSONObject(body).optJSONObject("data")?.optJSONArray("items")
+        loadedGenres = if (items != null) {
+            (0 until items.length()).map {
+                val g = items.getJSONObject(it)
+                g.getString("name") to g.getString("slug")
+            }
+        } else emptyList()
+        return getFilterList()
+    }
+
+    private class GenreFilter(genres: List<Pair<String, String>>) : Filter.Select<String>(
+        "Genre",
+        (listOf(ANY) + genres.map { it.first }).toTypedArray(),
+    ) {
+        // Parallel array of slugs lined up with `values`. Index 0 is the "Any" sentinel.
+        val slugs: Array<String> = (listOf("") + genres.map { it.second }).toTypedArray()
+    }
+
+    companion object {
+        private const val ANY = "Any"
+    }
 
     // Helpers
 
