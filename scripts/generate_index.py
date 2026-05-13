@@ -4,10 +4,14 @@ Generates index.json consumed by the Grimoire app's extension browser.
 - pkg / versionCode / versionName: from build.gradle.kts (APK metadata)
 - name / lang / baseUrl: from @SourceInfo annotation in Kotlin source
 - iconUrl: highest-density mipmap launcher icon copied alongside the APK
+- sha256: SHA-256 hex digest of the published APK, so the app can verify the
+  download wasn't corrupted (captive portals, lossy proxies, ...) before
+  handing it to the system installer.
 
 Merges over any existing index.json published at INDEX_URL so extensions that
 weren't rebuilt this run retain their previous entry.
 """
+import hashlib
 import json
 import os
 import re
@@ -34,6 +38,14 @@ def fetch_published() -> list:
     except Exception as e:
         print(f"[info] no published index ({e}); starting fresh")
         return []
+
+
+def sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def parse_gradle(build_gradle: Path) -> dict:
@@ -120,6 +132,7 @@ for lang_dir in sorted((ROOT / "src").iterdir()):
             "versionName": gradle["versionName"],
             "apk": apk_name,
             "url": f"{REPO_URL}/{apk_name}",
+            "sha256": sha256_of(apk_path),
         }
 
         icon_src = find_icon(ext_dir)
