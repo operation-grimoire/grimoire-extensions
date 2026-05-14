@@ -48,6 +48,11 @@ abstract class WPNovelsSource : ParsedHttpSource() {
     // Novel details
     override fun novelDetailsFromDocument(document: Document): Novel {
         val info = document.selectFirst("div.tab-summary")!!
+        // WP-Manga's rating widget is out of 5 already.
+        val ratingValue = document.selectFirst("[itemprop=ratingValue]")?.text()?.trim()?.toFloatOrNull()
+            ?: document.selectFirst("#averagerate")?.text()?.trim()?.toFloatOrNull()
+        val ratingCount = document.selectFirst("[itemprop=ratingCount]")?.text()?.trim()?.toIntOrNull()
+            ?: document.selectFirst("#countrate")?.text()?.trim()?.toIntOrNull()
         return Novel(
             url = document.location(),
             title = document.selectFirst("div.post-title h1")!!.text(),
@@ -56,6 +61,8 @@ abstract class WPNovelsSource : ParsedHttpSource() {
             description = document.selectFirst("div.summary__content")?.text(),
             genres = document.select("div.genres-content a").map { it.text() },
             status = document.selectFirst("div.summary-content")?.text().toNovelStatus(),
+            rating = ratingValue,
+            ratingCount = ratingCount,
             initialized = true,
         )
     }
