@@ -62,6 +62,8 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
         description = document.selectFirst(".desc-text")?.text(),
         genres = document.select(".info a[href*=/genre/]").map { it.text() },
         status = document.selectFirst(".info h3:contains(Status) + a")?.text().toNovelStatus(),
+        rating = document.selectFirst("[itemprop=ratingValue]")?.text()?.trim()?.toFloatOrNull(),
+        ratingCount = document.selectFirst("[itemprop=ratingCount]")?.text()?.trim()?.toIntOrNull(),
         initialized = true,
     )
 

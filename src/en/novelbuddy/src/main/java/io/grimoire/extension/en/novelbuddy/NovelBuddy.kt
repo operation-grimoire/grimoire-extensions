@@ -13,7 +13,7 @@ import okhttp3.Response
 import org.json.JSONObject
 import org.jsoup.Jsoup
 
-@SourceInfo(id = 2L, name = "NovelBuddy", lang = "en", baseUrl = "https://novelbuddy.com", versionCode = 3)
+@SourceInfo(id = 2L, name = "NovelBuddy", lang = "en", baseUrl = "https://novelbuddy.com", versionCode = 4)
 class NovelBuddy : HttpSource() {
 
     override val id = 2L
@@ -76,6 +76,9 @@ class NovelBuddy : HttpSource() {
         val manga = nextDataPageProps(html).getJSONObject("initialManga")
         val authorsArr = manga.optJSONArray("authors")
         val genresArr = manga.optJSONArray("genres")
+        val ratingRaw = manga.optDouble("rating", Double.NaN)
+        val rating = if (!ratingRaw.isNaN() && ratingRaw > 0) ratingRaw.toFloat() else null
+        val ratingCount = manga.optInt("ratingCount", 0).takeIf { it > 0 }
         return Novel(
             url = response.request.url.toString(),
             title = manga.getString("name"),
@@ -92,6 +95,8 @@ class NovelBuddy : HttpSource() {
                 (0 until genresArr.length()).map { genresArr.getJSONObject(it).getString("name") }
             else emptyList(),
             status = manga.optString("status").toNovelStatus(),
+            rating = rating,
+            ratingCount = ratingCount,
             initialized = true,
         )
     }

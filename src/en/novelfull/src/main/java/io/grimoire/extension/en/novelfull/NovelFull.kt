@@ -8,7 +8,7 @@ import io.grimoire.extensions.lib.theme.NovelFullThemeSource
     name = "NovelFull",
     lang = "en",
     baseUrl = "https://novelfull.com",
-    versionCode = 2,
+    versionCode = 3,
 )
 class NovelFull : NovelFullThemeSource() {
     override val id = 1L
