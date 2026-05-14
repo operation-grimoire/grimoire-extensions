@@ -54,18 +54,27 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
     override fun searchNovelsFromElement(element: Element) = popularNovelsFromElement(element)
     override fun searchNovelsNextPageSelector() = popularNovelsNextPageSelector()
 
-    override fun novelDetailsFromDocument(document: Document) = Novel(
-        url = document.location(),
-        title = document.selectFirst("h3.title")!!.text(),
-        thumbnailUrl = document.selectFirst(".book img")?.absUrl("src"),
-        author = document.selectFirst(".info a[href*=/author/]")?.text(),
-        description = document.selectFirst(".desc-text")?.text(),
-        genres = document.select(".info a[href*=/genre/]").map { it.text() },
-        status = document.selectFirst(".info h3:contains(Status) + a")?.text().toNovelStatus(),
-        rating = document.selectFirst("[itemprop=ratingValue]")?.text()?.trim()?.toFloatOrNull(),
-        ratingCount = document.selectFirst("[itemprop=ratingCount]")?.text()?.trim()?.toIntOrNull(),
-        initialized = true,
-    )
+    override fun novelDetailsFromDocument(document: Document): Novel {
+        // Theme stores rating in `#rateVal` (hidden input) on a 0..10 scale.
+        // Vote count lives in `.small em strong:last-of-type span`, formatted
+        // like `<strong><span>47498</span> ratings</strong>`.
+        val rating10 = document.selectFirst("#rateVal")?.attr("value")?.toFloatOrNull()
+        val rating = rating10?.let { (it / 2f).coerceIn(0f, 5f) }
+        val ratingCount = document.selectFirst(".small em strong:last-of-type span")
+            ?.text()?.replace(",", "")?.toIntOrNull()
+        return Novel(
+            url = document.location(),
+            title = document.selectFirst("h3.title")!!.text(),
+            thumbnailUrl = document.selectFirst(".book img")?.absUrl("src"),
+            author = document.selectFirst(".info a[href*=/author/]")?.text(),
+            description = document.selectFirst(".desc-text")?.text(),
+            genres = document.select(".info a[href*=/genre/]").map { it.text() },
+            status = document.selectFirst(".info h3:contains(Status) + a")?.text().toNovelStatus(),
+            rating = rating,
+            ratingCount = ratingCount,
+            initialized = true,
+        )
+    }
 
     override fun chapterListSelector() = "#list-chapter .row li"
 
