@@ -50,7 +50,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 10,
+    versionCode = 11,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -58,10 +58,15 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
     override val name = "Z-Library"
     override val lang = "all"
 
-    private val defaultBaseUrl = "https://z-library.bz"
+    // Search/popular/latest use the landing domain's JSON API + "Most
+    // Popular" HTML shelf; that endpoint does NOT exist on the per-user
+    // mirror. Sign-in and downloads use the per-user mirror, where the
+    // session cookie is valid. These are deliberately separate hosts.
+    private val landingUrl = "https://z-library.bz"
+    private val defaultAccountMirror = "https://z-library.im"
 
     @Volatile
-    private var mirror: String = defaultBaseUrl
+    private var accountMirror: String = defaultAccountMirror
 
     @Volatile
     private var email: String = ""
@@ -74,8 +79,10 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
     // landing domain, so login state is tracked per host.
     private val loggedInHosts = java.util.Collections.synchronizedSet(HashSet<String>())
 
+    // Listings always go through the landing domain (the JSON search API and
+    // "Most Popular" shelf live there, not on the per-user mirror).
     override val baseUrl: String
-        get() = mirror
+        get() = landingUrl
 
     // --- ConfigurableSource ---------------------------------------------------
 
@@ -93,9 +100,10 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         ),
         SourcePreference.EditText(
             key = PREF_BASE_URL,
-            title = "Mirror domain",
-            summary = "Change if the default domain is blocked",
-            default = defaultBaseUrl,
+            title = "Account mirror domain",
+            summary = "Domain used for sign-in and downloads (default " +
+                "z-library.im). Search always uses z-library.bz.",
+            default = defaultAccountMirror,
         ),
     )
 
@@ -107,11 +115,11 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         }
         email = newEmail
         password = newPassword
-        mirror = values[PREF_BASE_URL]
+        accountMirror = values[PREF_BASE_URL]
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?.let { normalizeBaseUrl(it) }
-            ?: defaultBaseUrl
+            ?: defaultAccountMirror
     }
 
     // --- Listings (always EPUB-constrained) -----------------------------------
@@ -145,7 +153,15 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         parseShelf(response)
 
     override suspend fun searchNovelsParse(response: Response): List<Novel> {
-        val json = JSONObject(response.body?.string().orEmpty())
+        val raw = response.body?.string().orEmpty().trim()
+        if (!raw.startsWith("{")) {
+            throw IOException(
+                "Z-Library: search is unavailable right now (the server returned a " +
+                    "non-JSON response). If you changed the account mirror, note " +
+                    "search always uses z-library.bz.",
+            )
+        }
+        val json = JSONObject(raw)
         if (json.optInt("success", 0) != 1) return emptyList()
         val books = json.optJSONArray("books") ?: return emptyList()
         return (0 until books.length()).mapNotNull { i ->
@@ -496,7 +512,7 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
                     message = "Enter both an email and a password.",
                 )
             }
-            val host = (baseUrl.toHttpUrlOrNull()?.host) ?: "z-library.bz"
+            val host = accountMirror.toHttpUrlOrNull()?.host ?: "z-library.im"
             loggedInHosts.remove(host)
             when (val error = performLogin(host)) {
                 null -> {
