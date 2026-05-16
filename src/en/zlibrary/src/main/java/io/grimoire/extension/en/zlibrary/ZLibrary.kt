@@ -13,20 +13,24 @@ import io.grimoire.api.source.SourcePreference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.io.IOException
-import java.net.URLEncoder
 
 /**
  * Z-Library book source. Only EPUB results are surfaced (the only format the
- * host app reads here): every listing request is constrained to
- * `extensions[]=EPUB` and non-EPUB cards are skipped defensively.
+ * host app reads here): every search is constrained to `extensions[]=EPUB` and
+ * non-EPUB results are skipped defensively.
  *
- * Books are whole-book EPUB files, so this is an [EpubSource]: the host
+ * Z-Library serves search results from a JSON endpoint (`POST /api/search`) and
+ * renders its "Most Popular" shelf as plain HTML on the landing page — the old
+ * `z-bookcard` scraping never matched, which is why search/popular/latest were
+ * empty. Books are whole-book EPUB files, so this is an [EpubSource]: the host
  * downloads the bytes via [getEpub] and parses them locally; [chapterListParse]
  * / [pageListParse] are intentionally empty.
  *
@@ -34,16 +38,18 @@ import java.net.URLEncoder
  * credentials ([ConfigurableSource]) raise/remove that limit. Cloudflare is
  * handled transparently by the default OkHttp client.
  *
- * Note: Z-Library rotates mirror domains and tweaks its markup; the card
- * parsing, download-link resolution and login are each isolated below so they
- * can be adjusted against live HTML without touching the rest of the source.
+ * Note: Z-Library rotates mirror domains (the landing domain proxies to a
+ * per-user mirror that book/download links point at) and tweaks its markup, so
+ * search/popular parsing, download-link resolution and login are each isolated
+ * below so they can be adjusted against live responses without touching the
+ * rest of the source.
  */
 @SourceInfo(
     id = 6L,
     name = "Z-Library",
     lang = "en",
     baseUrl = "https://z-library.bz",
-    versionCode = 1,
+    versionCode = 2,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -107,47 +113,76 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
     // --- Listings (always EPUB-constrained) -----------------------------------
 
+    // Z-Library has no anonymous "browse all" endpoint and the search API
+    // rejects an empty query, so popular/latest both read the landing page's
+    // server-rendered "Most Popular" shelf (single page, no pagination). The
+    // page marker lets the parser return an empty second page so the host stops
+    // paginating instead of looping the same shelf forever.
     override fun popularNovelsRequest(page: Int): Request =
-        GET(searchUrl(query = "", page = page, order = "popular"))
+        GET("$baseUrl/?$PAGE_MARKER=$page")
 
     override fun latestUpdatesRequest(page: Int): Request =
-        GET(searchUrl(query = "", page = page, order = "date"))
+        GET("$baseUrl/?$PAGE_MARKER=$page")
 
-    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request =
-        GET(searchUrl(query = query, page = page, order = null))
-
-    override suspend fun popularNovelsParse(response: Response): List<Novel> =
-        parseBookCards(response)
-
-    override suspend fun latestUpdatesParse(response: Response): List<Novel> =
-        parseBookCards(response)
-
-    override suspend fun searchNovelsParse(response: Response): List<Novel> =
-        parseBookCards(response)
-
-    override fun getFilterList(): List<Filter<*>> = emptyList()
-
-    private fun searchUrl(query: String, page: Int, order: String?): String {
-        val q = URLEncoder.encode(query.trim(), "UTF-8")
-        val orderParam = order?.let { "&order=$it" }.orEmpty()
-        return "$baseUrl/s/?q=$q&extensions%5B%5D=EPUB$orderParam&page=$page"
+    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
+        val body = FormBody.Builder()
+            .add("q", query.trim())
+            .add("page", page.toString())
+            .add("limit", "30")
+            .add("order", "")
+            .add("extensions[]", "EPUB")
+            .build()
+        return Request.Builder().url("$baseUrl/api/search").post(body).build()
     }
 
-    private fun parseBookCards(response: Response): List<Novel> {
-        val doc = response.asJsoup()
-        return doc.select("z-bookcard").mapNotNull { card ->
-            val extension = card.attr("extension").trim().lowercase()
-            if (extension.isNotEmpty() && extension != "epub") return@mapNotNull null
-            val href = card.attr("href").trim().ifEmpty { return@mapNotNull null }
-            val title = card.selectFirst("[slot=title]")?.text()?.trim()
-                ?: card.attr("title").trim()
-            if (title.isEmpty()) return@mapNotNull null
+    override suspend fun popularNovelsParse(response: Response): List<Novel> =
+        parseShelf(response)
+
+    override suspend fun latestUpdatesParse(response: Response): List<Novel> =
+        parseShelf(response)
+
+    override suspend fun searchNovelsParse(response: Response): List<Novel> {
+        val json = JSONObject(response.body?.string().orEmpty())
+        if (json.optInt("success", 0) != 1) return emptyList()
+        val books = json.optJSONArray("books") ?: return emptyList()
+        return (0 until books.length()).mapNotNull { i ->
+            val b = books.optJSONObject(i) ?: return@mapNotNull null
+            if (!b.optString("extension").equals("epub", ignoreCase = true)) return@mapNotNull null
+            val href = b.optString("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val title = b.optString("title").trim().takeIf { it.isNotEmpty() }
+                ?: return@mapNotNull null
             Novel(
                 url = href,
                 title = title,
-                author = card.selectFirst("[slot=author]")?.text()?.trim()
-                    ?.takeIf { it.isNotEmpty() },
-                thumbnailUrl = card.selectFirst("img")?.imageUrl(),
+                author = b.optString("author").trim().takeIf { it.isNotEmpty() },
+                description = b.optString("description").trim()
+                    .let { Jsoup.parse(it).text().trim() }
+                    .takeIf { it.isNotEmpty() },
+                thumbnailUrl = b.optString("cover").trim().takeIf { it.isNotEmpty() },
+                status = NovelStatus.COMPLETED,
+            )
+        }
+    }
+
+    override fun getFilterList(): List<Filter<*>> = emptyList()
+
+    private fun parseShelf(response: Response): List<Novel> {
+        val pageParam = response.request.url.queryParameter(PAGE_MARKER)
+        if (pageParam != null && pageParam != "1") return emptyList()
+        val doc = response.asJsoup()
+        return doc.select("z-cover").mapNotNull { cover ->
+            val link = generateSequence(cover.parent()) { it.parent() }
+                .firstOrNull { it.tagName() == "a" && it.hasAttr("href") }
+            val href = link?.attr("href")?.trim()?.substringBefore('?')?.takeIf { it.isNotEmpty() }
+                ?: return@mapNotNull null
+            val title = cover.attr("title").trim().takeIf { it.isNotEmpty() }
+                ?: return@mapNotNull null
+            Novel(
+                url = href,
+                title = title,
+                author = cover.attr("author").trim().takeIf { it.isNotEmpty() },
+                thumbnailUrl = cover.selectFirst("img")?.imageUrl(),
+                status = NovelStatus.COMPLETED,
             )
         }
     }
@@ -156,16 +191,20 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
     override suspend fun novelDetailsParse(response: Response): Novel {
         val doc = response.asJsoup()
-        val title = doc.selectFirst("h1[itemprop=name]")?.text()?.trim()
-            ?: doc.selectFirst("h1")?.text()?.trim()
+        fun meta(prop: String) =
+            doc.selectFirst("meta[property=og:$prop], meta[name=$prop]")
+                ?.attr("content")?.trim()?.takeIf { it.isNotEmpty() }
+        val title = meta("title")
+            ?: doc.selectFirst("h1[itemprop=name], h1")?.text()?.trim()
             ?: ""
-        val author = doc.selectFirst("a.color1[title], [itemprop=author], .book-property__author a")
-            ?.text()?.trim()?.takeIf { it.isNotEmpty() }
         val description = doc.selectFirst("#bookDescriptionBox, [itemprop=description]")
+            ?.text()?.trim()?.takeIf { it.isNotEmpty() }
+            ?: meta("description")
+        val author = doc.selectFirst("a.color1[title], [itemprop=author], .book-property__author a")
             ?.text()?.trim()?.takeIf { it.isNotEmpty() }
         val cover = doc.selectFirst(
             ".details-book-cover-container img, z-cover img, .z-book-cover img, img.cover",
-        )?.imageUrl()
+        )?.imageUrl() ?: meta("image")
         val genres = doc.select(".property_categories a, a[href*=/category/]")
             .map { it.text().trim() }
             .filter { it.isNotEmpty() }
@@ -193,7 +232,8 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
     override suspend fun getEpub(novel: Novel): ByteArray = withContext(Dispatchers.IO) {
         ensureLoggedIn()
 
-        val bookPage = client.newCall(GET(resolveUrl(novel.url))).execute()
+        val bookUrl = resolveUrl(novel.url)
+        val bookPage = client.newCall(GET(bookUrl)).execute()
         val downloadHref = bookPage.use { resp ->
             if (!resp.isSuccessful) {
                 throw IOException("Z-Library: failed to open book page (HTTP ${resp.code})")
@@ -204,17 +244,21 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
                 "or the daily download limit may have been reached.",
         )
 
-        val dlResponse = client.newCall(GET(resolveUrl(downloadHref))).execute()
+        // Download links are relative to the book's own mirror host (the
+        // per-user domain in novel.url), not the landing domain.
+        val dlUrl = resolveAgainst(bookUrl, downloadHref)
+        val dlResponse = client.newCall(GET(dlUrl)).execute()
         dlResponse.use { resp ->
             if (!resp.isSuccessful) {
                 throw IOException("Z-Library: download failed (HTTP ${resp.code})")
             }
             val contentType = resp.header("Content-Type").orEmpty().lowercase()
-            val isEpub = contentType.contains("epub") ||
+            val disposition = resp.header("Content-Disposition").orEmpty()
+            val looksLikeEpub = contentType.contains("epub") ||
                 contentType.contains("octet-stream") ||
                 contentType.contains("application/zip") ||
-                resp.header("Content-Disposition").orEmpty().contains(".epub", ignoreCase = true)
-            if (!isEpub || contentType.startsWith("text/html")) {
+                disposition.contains(".epub", ignoreCase = true)
+            if (contentType.startsWith("text/html") || !looksLikeEpub) {
                 throw IOException(
                     "Z-Library: download was blocked. Sign in via Source settings " +
                         "or the daily download limit has been reached.",
@@ -226,7 +270,8 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
     private fun resolveDownloadHref(doc: Document): String? =
         doc.selectFirst(
-            "a.addDownloadedBook, a.dlButton, a.btn-primary[href*=/dl/], a[href*=/dl/]",
+            "a.addDownloadedBook, a.dlButton, a.btn-default[href*=/dl/], " +
+                "a.btn-primary[href*=/dl/], a[href*=/dl/]",
         )?.attr("href")?.trim()?.takeIf { it.isNotEmpty() }
 
     // --- Optional account login ----------------------------------------------
@@ -270,6 +315,13 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         }
     }
 
+    private fun resolveAgainst(pageUrl: String, href: String): String {
+        if (href.startsWith("http")) return href
+        val base = pageUrl.toHttpUrlOrNull() ?: return resolveUrl(href)
+        val origin = "${base.scheme}://${base.host}"
+        return if (href.startsWith("/")) "$origin$href" else "$origin/$href"
+    }
+
     private fun Response.asJsoup(): Document =
         Jsoup.parse(body!!.string(), request.url.toString())
 
@@ -286,5 +338,6 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         private const val PREF_EMAIL = "email"
         private const val PREF_PASSWORD = "password"
         private const val PREF_BASE_URL = "base_url"
+        private const val PAGE_MARKER = "zlpage"
     }
 }
