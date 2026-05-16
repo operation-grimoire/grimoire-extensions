@@ -8,7 +8,7 @@ import io.grimoire.extensions.lib.theme.WPNovelsSource
     name = "Foxaholic",
     lang = "en",
     baseUrl = "https://www.foxaholic.com",
-    versionCode = 1,
+    versionCode = 2,
 )
 class Foxaholic : WPNovelsSource() {
     override val id = 5L

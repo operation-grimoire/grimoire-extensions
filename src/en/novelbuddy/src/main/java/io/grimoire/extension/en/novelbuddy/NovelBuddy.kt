@@ -13,7 +13,7 @@ import okhttp3.Response
 import org.json.JSONObject
 import org.jsoup.Jsoup
 
-@SourceInfo(id = 2L, name = "NovelBuddy", lang = "en", baseUrl = "https://novelbuddy.com", versionCode = 4)
+@SourceInfo(id = 2L, name = "NovelBuddy", lang = "en", baseUrl = "https://novelbuddy.com", versionCode = 5)
 class NovelBuddy : HttpSource() {
 
     override val id = 2L
