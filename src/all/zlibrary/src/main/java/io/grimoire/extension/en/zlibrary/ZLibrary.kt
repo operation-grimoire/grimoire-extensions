@@ -49,7 +49,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 6,
+    versionCode = 7,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -321,11 +321,30 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
                     url = next
                     return@use // follow the chain
                 }
-                val title = Jsoup.parse(html).title().trim()
-                    .takeIf { it.isNotEmpty() }?.let { " (page: \"$it\")" } ?: ""
+                val pageTitle = Jsoup.parse(html).title().trim()
+                val title = pageTitle.takeIf { it.isNotEmpty() }?.let { " (page: \"$it\")" } ?: ""
+                val finalUrl = resp.request.url
+                // Z-Library routes unauthorised/limited sessions to its online
+                // reader instead of the file. Retrying never helps — it's an
+                // authentication/entitlement state, so report it precisely.
+                val isReader = finalUrl.host.startsWith("reader.") ||
+                    finalUrl.encodedPath.contains("/read/") ||
+                    pageTitle.contains("reader", ignoreCase = true)
                 return when {
                     QUOTA_MARKERS.any { lower.contains(it) } -> DlResult.Fatal(
-                        "the daily download limit has been reached for this account",
+                        "the daily download limit for this account has been reached",
+                    )
+                    isReader -> DlResult.Fatal(
+                        "Z-Library served its online reader instead of a file — this " +
+                            "account isn't authorised to download this book from the " +
+                            "app. " +
+                            (if (email.isEmpty())
+                                "Add your Z-Library email/password in Source settings"
+                            else
+                                "Re-check the email/password in Source settings") +
+                            ", or sign in to Z-Library via the source's “Open in " +
+                            "WebView” (its session is shared with downloads). The " +
+                            "book may also be read-online-only for your account tier",
                     )
                     email.isEmpty() && LOGIN_MARKERS.any { lower.contains(it) } -> DlResult.Fatal(
                         "this book requires a signed-in account — add your " +
@@ -344,21 +363,30 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         return DlResult.Retry("too many download redirects")
     }
 
-    /** Extract a meta-refresh / JS / anchor target that leads to the file. */
+    /**
+     * Extract a meta-refresh / JS / anchor target that leads to the file.
+     * Online-reader targets are intentionally not followed so the caller can
+     * report the unauthorised-session state instead of chasing the reader.
+     */
     private fun nextDownloadLink(html: String, baseUrl: String): String? {
+        fun usable(raw: String): String? {
+            val abs = absolute(baseUrl, raw)
+            val low = abs.lowercase()
+            return if (low.contains("/read/") || low.contains("reader.")) null else abs
+        }
         val doc = Jsoup.parse(html, baseUrl)
         doc.selectFirst("meta[http-equiv=refresh]")?.attr("content")
             ?.let { Regex("url=([^;]+)", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1) }
             ?.trim()?.trim('\'', '"')?.takeIf { it.isNotEmpty() }
-            ?.let { return absolute(baseUrl, it) }
+            ?.let { usable(it)?.let { u -> return u } }
         Regex("""(?:window\.location(?:\.href)?|location\.href)\s*=\s*['"]([^'"]+)['"]""")
             .find(html)?.groupValues?.get(1)?.takeIf { it.isNotEmpty() }
-            ?.let { return absolute(baseUrl, it) }
+            ?.let { usable(it)?.let { u -> return u } }
         doc.selectFirst(
-            "a.addDownloadedBook, a.dlButton, a[href*=/dl/], a[href*=/d/], " +
+            "a.addDownloadedBook, a.dlButton, a[href*=/dl/], " +
                 "a[href$=.epub], a.btn[href*=download]",
         )?.attr("href")?.trim()?.takeIf { it.isNotEmpty() }
-            ?.let { return absolute(baseUrl, it) }
+            ?.let { usable(it)?.let { u -> return u } }
         return null
     }
 
@@ -413,6 +441,8 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
                 .url("https://$host/rpc.php")
                 .header("Referer", "https://$host/")
                 .header("X-Requested-With", "XMLHttpRequest")
+                .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                .header("Origin", "https://$host")
                 .post(body)
                 .build()
             val payload = runCatching {
