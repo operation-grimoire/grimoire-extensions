@@ -47,7 +47,9 @@ abstract class WPNovelsSource : ParsedHttpSource() {
 
     // Novel details
     override fun novelDetailsFromDocument(document: Document): Novel {
-        val info = document.selectFirst("div.tab-summary")!!
+        // Some Madara novel themes drop the "tab-summary" wrapper; fall back to
+        // the whole document so a layout tweak doesn't crash the whole source.
+        val info = document.selectFirst("div.tab-summary") ?: document
         // WP-Manga's rating widget is out of 5 already.
         val ratingValue = document.selectFirst("[itemprop=ratingValue]")?.text()?.trim()?.toFloatOrNull()
             ?: document.selectFirst("#averagerate")?.text()?.trim()?.toFloatOrNull()
@@ -55,10 +57,19 @@ abstract class WPNovelsSource : ParsedHttpSource() {
             ?: document.selectFirst("#countrate")?.text()?.trim()?.toIntOrNull()
         return Novel(
             url = document.location(),
-            title = document.selectFirst("div.post-title h1")!!.text(),
-            thumbnailUrl = info.selectFirst("div.summary_image img")?.attr("src"),
+            title = (
+                document.selectFirst("div.post-title h1")
+                    ?: document.selectFirst("div.post-title h3")
+                    ?: document.selectFirst("h1.entry-title")
+                )?.text()?.trim().orEmpty(),
+            thumbnailUrl = info.selectFirst("div.summary_image img")
+                ?.let { it.attr("data-src").ifBlank { it.attr("src") } },
             author = info.selectFirst("div.author-content a")?.text(),
-            description = document.selectFirst("div.summary__content")?.text(),
+            description = (
+                document.selectFirst("div.summary__content")
+                    ?: document.selectFirst("div.description-summary div.summary__content")
+                    ?: document.selectFirst("div.manga-excerpt")
+                )?.text(),
             genres = document.select("div.genres-content a").map { it.text() },
             status = document.selectFirst("div.summary-content")?.text().toNovelStatus(),
             rating = ratingValue,
@@ -76,8 +87,9 @@ abstract class WPNovelsSource : ParsedHttpSource() {
         uploadDate = 0L,
     )
 
-    // Page list — novel text content
-    override fun pageListSelector() = "div.reading-content p"
+    // Page list — novel text content. Madara novel variants put paragraphs in
+    // either ".reading-content" or a ".text-left" inner wrapper.
+    override fun pageListSelector() = "div.reading-content p, div.reading-content div.text-left p"
 
     override fun pageFromElement(element: Element, index: Int) = NovelPage(
         index = index,
