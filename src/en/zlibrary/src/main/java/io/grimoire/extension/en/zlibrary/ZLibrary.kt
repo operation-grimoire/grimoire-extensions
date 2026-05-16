@@ -49,7 +49,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "en",
     baseUrl = "https://z-library.bz",
-    versionCode = 2,
+    versionCode = 3,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -233,39 +233,60 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         ensureLoggedIn()
 
         val bookUrl = resolveUrl(novel.url)
-        val bookPage = client.newCall(GET(bookUrl)).execute()
-        val downloadHref = bookPage.use { resp ->
-            if (!resp.isSuccessful) {
-                throw IOException("Z-Library: failed to open book page (HTTP ${resp.code})")
-            }
-            resolveDownloadHref(resp.asJsoup())
-        } ?: throw IOException(
-            "Z-Library: no EPUB download link found. Sign in via Source settings " +
-                "or the daily download limit may have been reached.",
-        )
+        // The book lives on Z-Library's per-user mirror, which is Cloudflare
+        // gated. The default client solves the challenge transparently, but
+        // clearance is cookie-based and can need a follow-up request to land,
+        // so retry a few times before giving up.
+        val bookHtml = fetchWithRetry(bookUrl)
+            ?: throw IOException(
+                "Z-Library: couldn't load the book page — Cloudflare protection " +
+                    "on the mirror could not be cleared. Try again in a moment.",
+            )
+        val downloadHref = resolveDownloadHref(Jsoup.parse(bookHtml, bookUrl))
+            ?: throw IOException(
+                "Z-Library: no EPUB download link found. Sign in via Source " +
+                    "settings, or the daily download limit may have been reached.",
+            )
 
         // Download links are relative to the book's own mirror host (the
         // per-user domain in novel.url), not the landing domain.
         val dlUrl = resolveAgainst(bookUrl, downloadHref)
-        val dlResponse = client.newCall(GET(dlUrl)).execute()
-        dlResponse.use { resp ->
-            if (!resp.isSuccessful) {
-                throw IOException("Z-Library: download failed (HTTP ${resp.code})")
+        var lastError = "unknown error"
+        repeat(MAX_RETRIES) { attempt ->
+            client.newCall(GET(dlUrl)).execute().use { resp ->
+                val contentType = resp.header("Content-Type").orEmpty().lowercase()
+                val disposition = resp.header("Content-Disposition").orEmpty()
+                val looksLikeEpub = contentType.contains("epub") ||
+                    contentType.contains("octet-stream") ||
+                    contentType.contains("application/zip") ||
+                    disposition.contains(".epub", ignoreCase = true)
+                when {
+                    resp.isSuccessful && looksLikeEpub && !contentType.startsWith("text/html") ->
+                        return@withContext resp.body?.bytes()
+                            ?: throw IOException("Z-Library: empty download response")
+                    // Cloudflare interstitial / transient gate — back off and retry.
+                    resp.code == 503 || resp.code == 403 ->
+                        lastError = "blocked by Cloudflare (HTTP ${resp.code})"
+                    else ->
+                        lastError = "download was blocked — sign in via Source " +
+                            "settings, or the daily download limit has been reached"
+                }
             }
-            val contentType = resp.header("Content-Type").orEmpty().lowercase()
-            val disposition = resp.header("Content-Disposition").orEmpty()
-            val looksLikeEpub = contentType.contains("epub") ||
-                contentType.contains("octet-stream") ||
-                contentType.contains("application/zip") ||
-                disposition.contains(".epub", ignoreCase = true)
-            if (contentType.startsWith("text/html") || !looksLikeEpub) {
-                throw IOException(
-                    "Z-Library: download was blocked. Sign in via Source settings " +
-                        "or the daily download limit has been reached.",
-                )
-            }
-            resp.body?.bytes() ?: throw IOException("Z-Library: empty download response")
+            if (attempt < MAX_RETRIES - 1) Thread.sleep(1500L * (attempt + 1))
         }
+        throw IOException("Z-Library: $lastError.")
+    }
+
+    private fun fetchWithRetry(url: String): String? {
+        repeat(MAX_RETRIES) { attempt ->
+            runCatching {
+                client.newCall(GET(url)).execute().use { resp ->
+                    if (resp.isSuccessful) return resp.body?.string()
+                }
+            }
+            if (attempt < MAX_RETRIES - 1) Thread.sleep(1500L * (attempt + 1))
+        }
+        return null
     }
 
     private fun resolveDownloadHref(doc: Document): String? =
@@ -339,5 +360,6 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         private const val PREF_PASSWORD = "password"
         private const val PREF_BASE_URL = "base_url"
         private const val PAGE_MARKER = "zlpage"
+        private const val MAX_RETRIES = 3
     }
 }
