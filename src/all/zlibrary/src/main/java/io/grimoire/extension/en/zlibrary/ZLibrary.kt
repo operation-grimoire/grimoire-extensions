@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 15,
+    versionCode = 16,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource {
 
@@ -85,6 +85,14 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
     // client-side by dropping non-matching results.
     @Volatile
     private var enabledLanguages: Set<String> = emptySet()
+
+    // The homepage shelf's <img src="/covers150/..."> is a placeholder a web
+    // component rewrites to an absolute CDN URL via JS, so the relative path
+    // 404s for us. The search JSON returns absolute CDN cover URLs, so we learn
+    // the current cover-CDN origin from there and prefix shelf cover paths with
+    // it. Defaults to the commonly-served origin until a search refreshes it.
+    @Volatile
+    private var coverCdnOrigin: String = "https://s3proxy-alp2-covers.cdn-zlib.sk"
 
     // Listings always go through the landing domain (the JSON search API and
     // "Most Popular" shelf live there, not on the per-user mirror).
@@ -197,6 +205,10 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
             val href = b.optString("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val title = b.optString("title").trim().takeIf { it.isNotEmpty() }
                 ?: return@mapNotNull null
+            val cover = b.optString("cover").trim().takeIf { it.isNotEmpty() }
+            if (cover != null && cover.startsWith("http")) {
+                cover.toHttpUrlOrNull()?.let { coverCdnOrigin = "${it.scheme}://${it.host}" }
+            }
             Novel(
                 url = href,
                 title = title,
@@ -204,7 +216,7 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
                 description = b.optString("description").trim()
                     .let { Jsoup.parse(it).text().trim() }
                     .takeIf { it.isNotEmpty() },
-                thumbnailUrl = b.optString("cover").trim().takeIf { it.isNotEmpty() },
+                thumbnailUrl = cover,
                 language = b.optString("language").trim()
                     .takeIf { it.isNotEmpty() }
                     ?.replaceFirstChar { it.uppercase() },
@@ -226,11 +238,24 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
                 ?: return@mapNotNull null
             val title = cover.attr("title").trim().takeIf { it.isNotEmpty() }
                 ?: return@mapNotNull null
+            // Shelf <img src> is a placeholder; the real cover is the same path
+            // served by the cover CDN (learned from the search API).
+            val rawCover = cover.selectFirst("img")
+                ?.let { listOf("data-src", "data-original", "src").map(it::attr) }
+                ?.firstOrNull { it.isNotBlank() }
+                ?.trim()
+            val thumb = when {
+                rawCover == null -> null
+                rawCover.startsWith("http") -> rawCover
+                rawCover.startsWith("/cover") -> "$coverCdnOrigin$rawCover"
+                rawCover.startsWith("/") -> "$coverCdnOrigin$rawCover"
+                else -> rawCover
+            }
             Novel(
                 url = href,
                 title = title,
                 author = cover.attr("author").trim().takeIf { it.isNotEmpty() },
-                thumbnailUrl = cover.selectFirst("img")?.imageUrl(href),
+                thumbnailUrl = thumb,
                 status = NovelStatus.COMPLETED,
             )
         }
@@ -244,20 +269,26 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
         fun meta(prop: String) =
             doc.selectFirst("meta[property=og:$prop], meta[name=$prop]")
                 ?.attr("content")?.trim()?.takeIf { it.isNotEmpty() }
-        val title = meta("title")
-            ?: doc.selectFirst("h1[itemprop=name], h1")?.text()?.trim()
-            ?: ""
+        val ogTitle = meta("title").orEmpty()
         // Without the browser session token the mirror redirects book URLs to
-        // its homepage; don't pass that off as the book (every title/cover
-        // would be identical). Surface a clear, retryable error instead.
+        // its homepage. Rather than error, degrade gracefully: derive a title
+        // from the URL slug so the screen is usable and the (more robust)
+        // download path can still run.
         val path = response.request.url.encodedPath.trim('/')
-        if (path.isEmpty() || title.contains("largest e-book library", ignoreCase = true)) {
-            throw IOException(
-                "Z-Library: couldn't load book details yet (browser session not " +
-                    "established) — open the source via “Open in WebView” once, " +
-                    "then retry.",
+        if (path.isEmpty() || ogTitle.contains("largest e-book library", ignoreCase = true)) {
+            return Novel(
+                url = pageUrl,
+                title = titleFromUrl(pageUrl),
+                status = NovelStatus.COMPLETED,
+                initialized = true,
             )
         }
+        // og:title is "<Title> | <Author> | download on Z-Library"; prefer the
+        // page heading, else take the part before the first separator.
+        val title = doc.selectFirst("h1[itemprop=name], h1")?.text()?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: ogTitle.substringBefore(" | ").trim().takeIf { it.isNotEmpty() }
+            ?: ogTitle
         val description = doc.selectFirst("#bookDescriptionBox, [itemprop=description]")
             ?.text()?.trim()?.takeIf { it.isNotEmpty() }
             ?: meta("description")
@@ -597,6 +628,15 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
         val base = pageUrl.toHttpUrlOrNull() ?: return resolveUrl(href)
         val origin = "${base.scheme}://${base.host}"
         return if (href.startsWith("/")) "$origin$href" else "$origin/$href"
+    }
+
+    /** Best-effort human title from a /book/<id>/<slug>.html URL. */
+    private fun titleFromUrl(url: String): String {
+        val slug = url.substringBefore('?').substringAfterLast('/')
+            .removeSuffix(".html").replace('-', ' ').replace('_', ' ').trim()
+        return slug.split(' ').filter { it.isNotEmpty() }
+            .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+            .ifBlank { "Z-Library book" }
     }
 
     private fun Response.asJsoup(): Document =
