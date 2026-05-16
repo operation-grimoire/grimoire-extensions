@@ -50,7 +50,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 12,
+    versionCode = 13,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -200,7 +200,7 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
                 url = href,
                 title = title,
                 author = cover.attr("author").trim().takeIf { it.isNotEmpty() },
-                thumbnailUrl = cover.selectFirst("img")?.imageUrl(),
+                thumbnailUrl = cover.selectFirst("img")?.imageUrl(href),
                 status = NovelStatus.COMPLETED,
             )
         }
@@ -209,6 +209,7 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
     // --- Novel details --------------------------------------------------------
 
     override suspend fun novelDetailsParse(response: Response): Novel {
+        val pageUrl = response.request.url.toString()
         val doc = response.asJsoup()
         fun meta(prop: String) =
             doc.selectFirst("meta[property=og:$prop], meta[name=$prop]")
@@ -216,6 +217,17 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         val title = meta("title")
             ?: doc.selectFirst("h1[itemprop=name], h1")?.text()?.trim()
             ?: ""
+        // Without the browser session token the mirror redirects book URLs to
+        // its homepage; don't pass that off as the book (every title/cover
+        // would be identical). Surface a clear, retryable error instead.
+        val path = response.request.url.encodedPath.trim('/')
+        if (path.isEmpty() || title.contains("largest e-book library", ignoreCase = true)) {
+            throw IOException(
+                "Z-Library: couldn't load book details yet (browser session not " +
+                    "established) — open the source via “Open in WebView” once, " +
+                    "then retry.",
+            )
+        }
         val description = doc.selectFirst("#bookDescriptionBox, [itemprop=description]")
             ?.text()?.trim()?.takeIf { it.isNotEmpty() }
             ?: meta("description")
@@ -223,7 +235,7 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
             ?.text()?.trim()?.takeIf { it.isNotEmpty() }
         val cover = doc.selectFirst(
             ".details-book-cover-container img, z-cover img, .z-book-cover img, img.cover",
-        )?.imageUrl() ?: meta("image")
+        )?.imageUrl(pageUrl) ?: meta("image")
         val genres = doc.select(".property_categories a, a[href*=/category/]")
             .map { it.text().trim() }
             .filter { it.isNotEmpty() }
@@ -528,7 +540,10 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
     // --- Helpers --------------------------------------------------------------
 
-    private fun Element.imageUrl(): String? {
+    // Resolve a (possibly lazy/relative) image URL. Homepage shelf covers are
+    // root-relative (/covers150/...) but live on the book's mirror host, not
+    // the landing domain, so callers pass the owning page/book URL as [base].
+    private fun Element.imageUrl(base: String = baseUrl): String? {
         val raw = listOf("data-src", "data-flickity-lazyload", "data-original", "src")
             .map { attr(it).trim() }
             .firstOrNull { it.isNotEmpty() }
@@ -536,7 +551,7 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         return when {
             raw.startsWith("http") -> raw
             raw.startsWith("//") -> "https:$raw"
-            raw.startsWith("/") -> "$baseUrl$raw"
+            raw.startsWith("/") -> resolveAgainst(base, raw)
             else -> raw
         }
     }
