@@ -5,8 +5,10 @@ import io.grimoire.api.model.Filter
 import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.network.ParsedHttpSource
+import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URLEncoder
 
 /**
  * Base class for sites running the WP Novels WordPress plugin.
@@ -24,7 +26,7 @@ abstract class WPNovelsSource : ParsedHttpSource() {
     override fun popularNovelsFromElement(element: Element) = Novel(
         url = element.selectFirst("a")!!.attr("href"),
         title = element.selectFirst("h3 a, h4 a")!!.text(),
-        thumbnailUrl = element.selectFirst("img")?.attr("src"),
+        thumbnailUrl = element.lazyImageUrl(),
     )
 
     override fun popularNovelsNextPageSelector() = "a.next.page-numbers"
@@ -37,17 +39,30 @@ abstract class WPNovelsSource : ParsedHttpSource() {
     override fun latestUpdatesFromElement(element: Element) = popularNovelsFromElement(element)
     override fun latestUpdatesNextPageSelector() = popularNovelsNextPageSelector()
 
-    // Search — /?s=query&post_type=wp-manga
-    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>) =
-        GET("$baseUrl/?s=$query&post_type=wp-manga&paged=$page")
+    // Search — /?s=query&post_type=wp-manga (Madara renders results with a
+    // different wrapper than the /novel listing pages).
+    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): okhttp3.Request {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val path = if (page > 1) "/page/$page/" else "/"
+        return GET("$baseUrl$path?s=$encoded&post_type=wp-manga")
+    }
 
-    override fun searchNovelsSelector() = popularNovelsSelector()
-    override fun searchNovelsFromElement(element: Element) = popularNovelsFromElement(element)
-    override fun searchNovelsNextPageSelector() = popularNovelsNextPageSelector()
+    override fun searchNovelsSelector() = "div.c-tabs-item__content, div.page-item-detail"
+
+    override fun searchNovelsFromElement(element: Element) = Novel(
+        url = element.selectFirst("div.post-title a, h3 a, h4 a")!!.attr("href"),
+        title = element.selectFirst("div.post-title a, h3 a, h4 a")!!.text().trim(),
+        thumbnailUrl = element.lazyImageUrl(),
+    )
+
+    override fun searchNovelsNextPageSelector() =
+        "div.wp-pagenavi a.nextpostslink, a.next.page-numbers"
 
     // Novel details
     override fun novelDetailsFromDocument(document: Document): Novel {
-        val info = document.selectFirst("div.tab-summary")!!
+        // Some Madara novel themes drop the "tab-summary" wrapper; fall back to
+        // the whole document so a layout tweak doesn't crash the whole source.
+        val info = document.selectFirst("div.tab-summary") ?: document
         // WP-Manga's rating widget is out of 5 already.
         val ratingValue = document.selectFirst("[itemprop=ratingValue]")?.text()?.trim()?.toFloatOrNull()
             ?: document.selectFirst("#averagerate")?.text()?.trim()?.toFloatOrNull()
@@ -55,10 +70,18 @@ abstract class WPNovelsSource : ParsedHttpSource() {
             ?: document.selectFirst("#countrate")?.text()?.trim()?.toIntOrNull()
         return Novel(
             url = document.location(),
-            title = document.selectFirst("div.post-title h1")!!.text(),
-            thumbnailUrl = info.selectFirst("div.summary_image img")?.attr("src"),
+            title = (
+                document.selectFirst("div.post-title h1")
+                    ?: document.selectFirst("div.post-title h3")
+                    ?: document.selectFirst("h1.entry-title")
+                )?.text()?.trim().orEmpty(),
+            thumbnailUrl = info.selectFirst("div.summary_image")?.lazyImageUrl(),
             author = info.selectFirst("div.author-content a")?.text(),
-            description = document.selectFirst("div.summary__content")?.text(),
+            description = (
+                document.selectFirst("div.summary__content")
+                    ?: document.selectFirst("div.description-summary div.summary__content")
+                    ?: document.selectFirst("div.manga-excerpt")
+                )?.text(),
             genres = document.select("div.genres-content a").map { it.text() },
             status = document.selectFirst("div.summary-content")?.text().toNovelStatus(),
             rating = ratingValue,
@@ -67,7 +90,8 @@ abstract class WPNovelsSource : ParsedHttpSource() {
         )
     }
 
-    // Chapter list
+    // Chapter list. Madara lists chapters newest-first; the reader expects
+    // ascending order (chapter 1 first), so reverse the parsed list.
     override fun chapterListSelector() = "li.wp-manga-chapter"
 
     override fun chapterFromElement(element: Element) = Chapter(
@@ -76,8 +100,12 @@ abstract class WPNovelsSource : ParsedHttpSource() {
         uploadDate = 0L,
     )
 
-    // Page list — novel text content
-    override fun pageListSelector() = "div.reading-content p"
+    override suspend fun chapterListParse(response: Response): List<Chapter> =
+        super.chapterListParse(response).reversed()
+
+    // Page list — novel text content. Madara novel variants put paragraphs in
+    // either ".reading-content" or a ".text-left" inner wrapper.
+    override fun pageListSelector() = "div.reading-content p, div.reading-content div.text-left p"
 
     override fun pageFromElement(element: Element, index: Int) = NovelPage(
         index = index,
@@ -86,6 +114,17 @@ abstract class WPNovelsSource : ParsedHttpSource() {
 
     // Default: no filters
     override fun getFilterList() = emptyList<Filter<*>>()
+
+    // Madara lazy-loads cover images: the real URL lives in a data-* attribute
+    // or srcset while src is a placeholder (often a data: URI).
+    private fun Element.lazyImageUrl(): String? {
+        val img = selectFirst("img") ?: return null
+        listOf("data-src", "data-lazy-src", "data-cfsrc", "src").forEach { attr ->
+            val value = img.attr(attr).trim()
+            if (value.isNotEmpty() && !value.startsWith("data:")) return value
+        }
+        return img.attr("srcset").trim().substringBefore(" ").takeIf { it.isNotEmpty() }
+    }
 
     private fun String?.toNovelStatus() = when {
         this == null -> io.grimoire.api.model.NovelStatus.UNKNOWN
