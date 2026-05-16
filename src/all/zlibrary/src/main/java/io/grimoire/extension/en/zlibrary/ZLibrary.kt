@@ -9,6 +9,7 @@ import io.grimoire.api.network.HttpSource
 import io.grimoire.api.source.ConfigValidationResult
 import io.grimoire.api.source.ConfigurableSource
 import io.grimoire.api.source.EpubSource
+import io.grimoire.api.source.MultiLanguageSource
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.source.SourcePreference
 import kotlinx.coroutines.Dispatchers
@@ -50,9 +51,9 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 13,
+    versionCode = 14,
 )
-class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
+class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource {
 
     override val id = 6L
     override val name = "Z-Library"
@@ -78,6 +79,12 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
     // the download host (the per-user mirror in a book's URL) differs from the
     // landing domain, so login state is tracked per host.
     private val loggedInHosts = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    // Lowercased enabled content languages. Empty = no filter. Z-Library's
+    // search API ignores any language parameter (verified), so this is applied
+    // client-side by dropping non-matching results.
+    @Volatile
+    private var enabledLanguages: Set<String> = emptySet()
 
     // Listings always go through the landing domain (the JSON search API and
     // "Most Popular" shelf live there, not on the per-user mirror).
@@ -120,6 +127,21 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
             ?.takeIf { it.isNotEmpty() }
             ?.let { normalizeBaseUrl(it) }
             ?: defaultAccountMirror
+    }
+
+    // --- MultiLanguageSource --------------------------------------------------
+
+    override fun availableLanguages(): List<String> = listOf(
+        "English", "Spanish", "Portuguese", "French", "German", "Italian",
+        "Dutch", "Russian", "Ukrainian", "Polish", "Czech", "Romanian",
+        "Greek", "Turkish", "Arabic", "Hebrew", "Hindi", "Bengali",
+        "Chinese", "Japanese", "Korean", "Vietnamese", "Thai", "Indonesian",
+        "Swedish", "Norwegian", "Danish", "Finnish", "Hungarian", "Persian",
+    )
+
+    override fun setEnabledLanguages(languages: Set<String>) {
+        enabledLanguages = languages.map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() }.toSet()
     }
 
     // --- Listings (always EPUB-constrained) -----------------------------------
@@ -167,6 +189,11 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         return (0 until books.length()).mapNotNull { i ->
             val b = books.optJSONObject(i) ?: return@mapNotNull null
             if (!b.optString("extension").equals("epub", ignoreCase = true)) return@mapNotNull null
+            // Z-Library's API ignores language params, so filter client-side.
+            if (enabledLanguages.isNotEmpty()) {
+                val lang = b.optString("language").trim().lowercase()
+                if (lang.isNotEmpty() && lang !in enabledLanguages) return@mapNotNull null
+            }
             val href = b.optString("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val title = b.optString("title").trim().takeIf { it.isNotEmpty() }
                 ?: return@mapNotNull null
