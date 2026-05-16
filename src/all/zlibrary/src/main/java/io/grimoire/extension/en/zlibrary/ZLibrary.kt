@@ -6,6 +6,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
+import io.grimoire.api.source.ConfigValidationResult
 import io.grimoire.api.source.ConfigurableSource
 import io.grimoire.api.source.EpubSource
 import io.grimoire.api.source.SourceInfo
@@ -49,7 +50,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 8,
+    versionCode = 9,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -428,42 +429,76 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         if (loggedInHosts.contains(host)) return
         synchronized(loggedInHosts) {
             if (loggedInHosts.contains(host)) return
-            val body = FormBody.Builder()
-                .add("email", email)
-                .add("password", password)
-                .add("site_mode", "books")
-                .add("action", "login")
-                .add("redirectUrl", "")
-                .build()
-            val request = Request.Builder()
-                .url("https://$host/login")
-                .header("Referer", "https://$host/login")
-                .header("Origin", "https://$host")
-                .post(body)
-                .build()
-            val payload = runCatching {
-                client.newCall(request).execute().use { resp ->
-                    resp.body?.string().orEmpty()
-                }
-            }.getOrDefault("")
-            // A failed sign-in re-renders the login form (with an error); a
-            // successful one redirects to an authenticated page that no longer
-            // contains the password field.
-            val stillLoginForm = payload.contains("name=\"password\"", ignoreCase = true) ||
-                payload.contains("name='password'", ignoreCase = true)
-            val rejected = payload.contains("incorrect", ignoreCase = true) ||
-                payload.contains("wrong email or password", ignoreCase = true) ||
-                payload.contains("user not found", ignoreCase = true) ||
-                payload.contains("\"validationError\":true", ignoreCase = true)
-            if (rejected || (stillLoginForm && payload.isNotEmpty())) {
-                throw IOException(
-                    "Z-Library: sign-in failed — check the email/password in " +
-                        "Source settings.",
-                )
-            }
+            val error = performLogin(host)
+            if (error != null) throw IOException("Z-Library: $error")
             loggedInHosts.add(host)
         }
     }
+
+    /**
+     * Performs the single sign-on POST against [host]. Returns `null` on
+     * success or a short failure message. A failed sign-in re-renders the
+     * login form (with an error); a successful one redirects to an
+     * authenticated page that no longer contains the password field.
+     */
+    private fun performLogin(host: String): String? {
+        val body = FormBody.Builder()
+            .add("email", email)
+            .add("password", password)
+            .add("site_mode", "books")
+            .add("action", "login")
+            .add("redirectUrl", "")
+            .build()
+        val request = Request.Builder()
+            .url("https://$host/login")
+            .header("Referer", "https://$host/login")
+            .header("Origin", "https://$host")
+            .post(body)
+            .build()
+        val payload = runCatching {
+            client.newCall(request).execute().use { resp -> resp.body?.string().orEmpty() }
+        }.getOrElse { return "couldn't reach Z-Library to sign in (${it.message ?: "network error"})" }
+        if (payload.isEmpty()) {
+            return "no response from Z-Library sign-in — try again in a moment"
+        }
+        val stillLoginForm = payload.contains("name=\"password\"", ignoreCase = true) ||
+            payload.contains("name='password'", ignoreCase = true)
+        val rejected = payload.contains("incorrect", ignoreCase = true) ||
+            payload.contains("wrong email or password", ignoreCase = true) ||
+            payload.contains("user not found", ignoreCase = true) ||
+            payload.contains("\"validationError\":true", ignoreCase = true)
+        return if (rejected || stillLoginForm) {
+            "sign-in failed — check the email/password in Source settings"
+        } else {
+            null
+        }
+    }
+
+    override suspend fun validateConfiguration(): ConfigValidationResult =
+        withContext(Dispatchers.IO) {
+            if (email.isEmpty() && password.isEmpty()) {
+                return@withContext ConfigValidationResult(
+                    success = true,
+                    message = "No account set — downloads use Z-Library's anonymous " +
+                        "daily limit. Add an email/password to raise it.",
+                )
+            }
+            if (email.isEmpty() || password.isEmpty()) {
+                return@withContext ConfigValidationResult(
+                    success = false,
+                    message = "Enter both an email and a password.",
+                )
+            }
+            val host = (baseUrl.toHttpUrlOrNull()?.host) ?: "z-library.bz"
+            loggedInHosts.remove(host)
+            when (val error = performLogin(host)) {
+                null -> {
+                    loggedInHosts.add(host)
+                    ConfigValidationResult(true, "Signed in to Z-Library successfully.")
+                }
+                else -> ConfigValidationResult(false, error.replaceFirstChar { it.uppercase() })
+            }
+        }
 
     // --- Helpers --------------------------------------------------------------
 
