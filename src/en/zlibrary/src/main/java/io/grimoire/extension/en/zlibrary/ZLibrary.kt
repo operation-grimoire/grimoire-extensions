@@ -49,7 +49,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "en",
     baseUrl = "https://z-library.bz",
-    versionCode = 2,
+    versionCode = 4,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -68,8 +68,10 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
     @Volatile
     private var password: String = ""
 
-    @Volatile
-    private var loggedIn: Boolean = false
+    // Z-Library uses a single-login that issues per-host session cookies, and
+    // the download host (the per-user mirror in a book's URL) differs from the
+    // landing domain, so login state is tracked per host.
+    private val loggedInHosts = java.util.Collections.synchronizedSet(HashSet<String>())
 
     override val baseUrl: String
         get() = mirror
@@ -100,7 +102,7 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         val newEmail = values[PREF_EMAIL].orEmpty().trim()
         val newPassword = values[PREF_PASSWORD].orEmpty()
         if (newEmail != email || newPassword != password) {
-            loggedIn = false
+            loggedInHosts.clear()
         }
         email = newEmail
         password = newPassword
@@ -230,42 +232,92 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
     // --- EpubSource -----------------------------------------------------------
 
     override suspend fun getEpub(novel: Novel): ByteArray = withContext(Dispatchers.IO) {
-        ensureLoggedIn()
-
         val bookUrl = resolveUrl(novel.url)
-        val bookPage = client.newCall(GET(bookUrl)).execute()
-        val downloadHref = bookPage.use { resp ->
-            if (!resp.isSuccessful) {
-                throw IOException("Z-Library: failed to open book page (HTTP ${resp.code})")
-            }
-            resolveDownloadHref(resp.asJsoup())
-        } ?: throw IOException(
-            "Z-Library: no EPUB download link found. Sign in via Source settings " +
-                "or the daily download limit may have been reached.",
-        )
+        val host = bookUrl.toHttpUrlOrNull()?.host
+            ?: throw IOException("Z-Library: invalid book URL")
+        // Authenticate on the download host before fetching the (logged-in)
+        // book page so the page exposes the real download link and the cookie
+        // jar carries the session to the /dl request.
+        ensureLoggedIn(host)
+
+        // The book lives on Z-Library's per-user mirror, which is Cloudflare
+        // gated. The default client solves the challenge transparently, but
+        // clearance is cookie-based and can need a follow-up request to land,
+        // so retry a few times before giving up.
+        val bookHtml = fetchWithRetry(bookUrl)
+            ?: throw IOException(
+                "Z-Library: couldn't load the book page — Cloudflare protection " +
+                    "on the mirror could not be cleared. Try again in a moment.",
+            )
+        val downloadHref = resolveDownloadHref(Jsoup.parse(bookHtml, bookUrl))
+            ?: throw IOException(
+                "Z-Library: no EPUB download link found. Sign in via Source " +
+                    "settings, or the daily download limit may have been reached.",
+            )
 
         // Download links are relative to the book's own mirror host (the
         // per-user domain in novel.url), not the landing domain.
         val dlUrl = resolveAgainst(bookUrl, downloadHref)
-        val dlResponse = client.newCall(GET(dlUrl)).execute()
-        dlResponse.use { resp ->
-            if (!resp.isSuccessful) {
-                throw IOException("Z-Library: download failed (HTTP ${resp.code})")
+        var lastError = "unknown error"
+        repeat(MAX_RETRIES) { attempt ->
+            val request = Request.Builder().url(dlUrl)
+                .header("Referer", bookUrl)
+                .build()
+            client.newCall(request).execute().use { resp ->
+                val contentType = resp.header("Content-Type").orEmpty().lowercase()
+                val disposition = resp.header("Content-Disposition").orEmpty()
+                val isHtml = contentType.startsWith("text/html")
+                val looksLikeEpub = contentType.contains("epub") ||
+                    contentType.contains("octet-stream") ||
+                    contentType.contains("zip") ||
+                    contentType.contains("force-download") ||
+                    disposition.contains("attachment", ignoreCase = true) ||
+                    disposition.contains(".epub", ignoreCase = true)
+                when {
+                    resp.isSuccessful && looksLikeEpub && !isHtml ->
+                        return@withContext resp.body?.bytes()
+                            ?: throw IOException("Z-Library: empty download response")
+                    resp.code == 503 || resp.code == 403 ->
+                        lastError = "blocked by Cloudflare (HTTP ${resp.code})"
+                    isHtml -> {
+                        // Anonymous / over-quota responses are HTML pages; the
+                        // wording tells us which so the message is actionable.
+                        val peek = resp.peekBody(64 * 1024).string().lowercase()
+                        lastError = when {
+                            peek.contains("daily limit") || peek.contains("download limit") ||
+                                peek.contains("limit reached") ->
+                                "the daily download limit has been reached for this account"
+                            peek.contains("log in") || peek.contains("sign in") ||
+                                peek.contains("/login") ->
+                                if (email.isEmpty())
+                                    "this book requires a signed-in account — add your " +
+                                        "Z-Library credentials in Source settings"
+                                else
+                                    "the session was not accepted — re-check the " +
+                                        "email/password in Source settings"
+                            else ->
+                                "download was blocked (the server returned a web page, " +
+                                    "not a file)"
+                        }
+                    }
+                    else -> lastError = "download failed (HTTP ${resp.code})"
+                }
             }
-            val contentType = resp.header("Content-Type").orEmpty().lowercase()
-            val disposition = resp.header("Content-Disposition").orEmpty()
-            val looksLikeEpub = contentType.contains("epub") ||
-                contentType.contains("octet-stream") ||
-                contentType.contains("application/zip") ||
-                disposition.contains(".epub", ignoreCase = true)
-            if (contentType.startsWith("text/html") || !looksLikeEpub) {
-                throw IOException(
-                    "Z-Library: download was blocked. Sign in via Source settings " +
-                        "or the daily download limit has been reached.",
-                )
-            }
-            resp.body?.bytes() ?: throw IOException("Z-Library: empty download response")
+            if (attempt < MAX_RETRIES - 1) Thread.sleep(1500L * (attempt + 1))
         }
+        throw IOException("Z-Library: $lastError.")
+    }
+
+    private fun fetchWithRetry(url: String): String? {
+        repeat(MAX_RETRIES) { attempt ->
+            runCatching {
+                client.newCall(GET(url)).execute().use { resp ->
+                    if (resp.isSuccessful) return resp.body?.string()
+                }
+            }
+            if (attempt < MAX_RETRIES - 1) Thread.sleep(1500L * (attempt + 1))
+        }
+        return null
     }
 
     private fun resolveDownloadHref(doc: Document): String? =
@@ -276,27 +328,52 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
     // --- Optional account login ----------------------------------------------
 
-    private fun ensureLoggedIn() {
-        if (loggedIn || email.isEmpty() || password.isEmpty()) return
-        synchronized(this) {
-            if (loggedIn) return
-            runCatching {
-                val body = FormBody.Builder()
-                    .add("email", email)
-                    .add("password", password)
-                    .add("action", "login")
-                    .add("gg_json_mode", "1")
-                    .build()
-                val request = Request.Builder()
-                    .url("$baseUrl/rpc.php")
-                    .post(body)
-                    .build()
-                client.newCall(request).execute().use { it.body?.string() }
+    /**
+     * Logs the account in on [host] (the host that will serve the download).
+     * Z-Library's single-login issues `remix_userid` / `remix_userkey` cookies
+     * scoped to the host they were requested on, so logging in on the landing
+     * domain does not authorise downloads on a per-user mirror. No-op when no
+     * credentials are configured (anonymous, quota-limited). Throws only on an
+     * explicit credential rejection so a bad password is reported clearly
+     * rather than surfacing later as a generic "download blocked".
+     */
+    private fun ensureLoggedIn(host: String) {
+        if (email.isEmpty() || password.isEmpty()) return
+        if (loggedInHosts.contains(host)) return
+        synchronized(loggedInHosts) {
+            if (loggedInHosts.contains(host)) return
+            val body = FormBody.Builder()
+                .add("isModal", "true")
+                .add("email", email)
+                .add("password", password)
+                .add("site_mode", "books")
+                .add("action", "login")
+                .add("isSingleLogin", "1")
+                .add("redirectUrl", "")
+                .add("gg_json_mode", "1")
+                .build()
+            val request = Request.Builder()
+                .url("https://$host/rpc.php")
+                .header("Referer", "https://$host/")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .post(body)
+                .build()
+            val payload = runCatching {
+                client.newCall(request).execute().use { it.body?.string().orEmpty() }
+            }.getOrDefault("")
+            // Explicit rejection -> surface immediately. Anything else is
+            // treated as best-effort: the shared cookie jar carries whatever
+            // session cookie was issued.
+            if (payload.contains("\"validationError\":true", ignoreCase = true) ||
+                payload.contains("Incorrect email", ignoreCase = true) ||
+                payload.contains("wrong email or password", ignoreCase = true)
+            ) {
+                throw IOException(
+                    "Z-Library: sign-in failed — check the email/password in " +
+                        "Source settings.",
+                )
             }
-            // Best-effort: even if the parse of the login response fails we mark
-            // it attempted so we don't retry on every download; the cookie jar
-            // shared with the WebView carries any issued session cookie.
-            loggedIn = true
+            loggedInHosts.add(host)
         }
     }
 
@@ -339,5 +416,6 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         private const val PREF_PASSWORD = "password"
         private const val PREF_BASE_URL = "base_url"
         private const val PAGE_MARKER = "zlpage"
+        private const val MAX_RETRIES = 3
     }
 }
