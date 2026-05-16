@@ -49,7 +49,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 7,
+    versionCode = 8,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -415,12 +415,13 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
     /**
      * Logs the account in on [host] (the host that will serve the download).
-     * Z-Library's single-login issues `remix_userid` / `remix_userkey` cookies
-     * scoped to the host they were requested on, so logging in on the landing
-     * domain does not authorise downloads on a per-user mirror. No-op when no
-     * credentials are configured (anonymous, quota-limited). Throws only on an
-     * explicit credential rejection so a bad password is reported clearly
-     * rather than surfacing later as a generic "download blocked".
+     * Z-Library's single sign-on form posts to `/login` with
+     * `site_mode=books&action=login` and issues `remix_userid`/`remix_userkey`
+     * cookies scoped to that host, so logging in on the landing domain does
+     * not authorise downloads on a per-user mirror. No-op when no credentials
+     * are configured (anonymous, quota-limited). Throws on an explicit
+     * credential rejection so a bad password is reported clearly rather than
+     * surfacing later as the online-reader redirect.
      */
     private fun ensureLoggedIn(host: String) {
         if (email.isEmpty() || password.isEmpty()) return
@@ -428,33 +429,33 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         synchronized(loggedInHosts) {
             if (loggedInHosts.contains(host)) return
             val body = FormBody.Builder()
-                .add("isModal", "true")
                 .add("email", email)
                 .add("password", password)
                 .add("site_mode", "books")
                 .add("action", "login")
-                .add("isSingleLogin", "1")
                 .add("redirectUrl", "")
-                .add("gg_json_mode", "1")
                 .build()
             val request = Request.Builder()
-                .url("https://$host/rpc.php")
-                .header("Referer", "https://$host/")
-                .header("X-Requested-With", "XMLHttpRequest")
-                .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                .url("https://$host/login")
+                .header("Referer", "https://$host/login")
                 .header("Origin", "https://$host")
                 .post(body)
                 .build()
             val payload = runCatching {
-                client.newCall(request).execute().use { it.body?.string().orEmpty() }
+                client.newCall(request).execute().use { resp ->
+                    resp.body?.string().orEmpty()
+                }
             }.getOrDefault("")
-            // Explicit rejection -> surface immediately. Anything else is
-            // treated as best-effort: the shared cookie jar carries whatever
-            // session cookie was issued.
-            if (payload.contains("\"validationError\":true", ignoreCase = true) ||
-                payload.contains("Incorrect email", ignoreCase = true) ||
-                payload.contains("wrong email or password", ignoreCase = true)
-            ) {
+            // A failed sign-in re-renders the login form (with an error); a
+            // successful one redirects to an authenticated page that no longer
+            // contains the password field.
+            val stillLoginForm = payload.contains("name=\"password\"", ignoreCase = true) ||
+                payload.contains("name='password'", ignoreCase = true)
+            val rejected = payload.contains("incorrect", ignoreCase = true) ||
+                payload.contains("wrong email or password", ignoreCase = true) ||
+                payload.contains("user not found", ignoreCase = true) ||
+                payload.contains("\"validationError\":true", ignoreCase = true)
+            if (rejected || (stillLoginForm && payload.isNotEmpty())) {
                 throw IOException(
                     "Z-Library: sign-in failed — check the email/password in " +
                         "Source settings.",
