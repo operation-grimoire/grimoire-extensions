@@ -50,7 +50,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 9,
+    versionCode = 10,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -437,9 +437,14 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
     /**
      * Performs the single sign-on POST against [host]. Returns `null` on
-     * success or a short failure message. A failed sign-in re-renders the
-     * login form (with an error); a successful one redirects to an
-     * authenticated page that no longer contains the password field.
+     * success or a short failure message.
+     *
+     * Z-Library embeds a login modal in every page, so the presence of a
+     * password field means nothing. The authoritative success signal is the
+     * `remix_userkey` session cookie: a failed sign-in just re-renders the
+     * SSO page (HTTP 200, no auth cookie); a success sets it and redirects
+     * away from `/login`. We check the shared cookie store (the same one the
+     * downloader uses) plus the final URL.
      */
     private fun performLogin(host: String): String? {
         val body = FormBody.Builder()
@@ -455,22 +460,24 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
             .header("Origin", "https://$host")
             .post(body)
             .build()
-        val payload = runCatching {
-            client.newCall(request).execute().use { resp -> resp.body?.string().orEmpty() }
-        }.getOrElse { return "couldn't reach Z-Library to sign in (${it.message ?: "network error"})" }
-        if (payload.isEmpty()) {
-            return "no response from Z-Library sign-in — try again in a moment"
+        val finalUrl = runCatching {
+            client.newCall(request).execute().use { resp ->
+                resp.body?.string()
+                resp.request.url.toString()
+            }
+        }.getOrElse {
+            return "couldn't reach Z-Library to sign in (${it.message ?: "network error"})"
         }
-        val stillLoginForm = payload.contains("name=\"password\"", ignoreCase = true) ||
-            payload.contains("name='password'", ignoreCase = true)
-        val rejected = payload.contains("incorrect", ignoreCase = true) ||
-            payload.contains("wrong email or password", ignoreCase = true) ||
-            payload.contains("user not found", ignoreCase = true) ||
-            payload.contains("\"validationError\":true", ignoreCase = true)
-        return if (rejected || stillLoginForm) {
-            "sign-in failed — check the email/password in Source settings"
-        } else {
+        val cookies = runCatching {
+            android.webkit.CookieManager.getInstance().getCookie("https://$host").orEmpty()
+        }.getOrDefault("")
+        val authed = Regex("remix_userkey=[^;\\s]+").containsMatchIn(cookies) &&
+            !Regex("remix_userkey=(deleted|;|\\s|$)").containsMatchIn(cookies)
+        val redirectedAway = !finalUrl.substringBefore('?').trimEnd('/').endsWith("/login")
+        return if (authed || redirectedAway) {
             null
+        } else {
+            "sign-in failed — check the email/password in Source settings"
         }
     }
 
