@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 16,
+    versionCode = 17,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource {
 
@@ -231,6 +231,9 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
         val pageParam = response.request.url.queryParameter(PAGE_MARKER)
         if (pageParam != null && pageParam != "1") return emptyList()
         val doc = response.asJsoup()
+        // The homepage lists some books twice (with and without a ?dsource
+        // query); after stripping the query their URLs collide, which would
+        // crash the host's keyed list — so de-duplicate by URL.
         return doc.select("z-cover").mapNotNull { cover ->
             val link = generateSequence(cover.parent()) { it.parent() }
                 .firstOrNull { it.tagName() == "a" && it.hasAttr("href") }
@@ -258,7 +261,7 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
                 thumbnailUrl = thumb,
                 status = NovelStatus.COMPLETED,
             )
-        }
+        }.distinctBy { it.url }
     }
 
     // --- Novel details --------------------------------------------------------
