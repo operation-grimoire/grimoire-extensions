@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 17,
+    versionCode = 18,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource {
 
@@ -217,11 +217,12 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
                     .let { Jsoup.parse(it).text().trim() }
                     .takeIf { it.isNotEmpty() },
                 thumbnailUrl = cover,
+                status = NovelStatus.COMPLETED,
+            ).apply {
                 language = b.optString("language").trim()
                     .takeIf { it.isNotEmpty() }
-                    ?.replaceFirstChar { it.uppercase() },
-                status = NovelStatus.COMPLETED,
-            )
+                    ?.replaceFirstChar { it.uppercase() }
+            }
         }
     }
 
@@ -316,10 +317,9 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
             author = author,
             description = description,
             genres = genres,
-            language = language,
             status = NovelStatus.COMPLETED,
             initialized = true,
-        )
+        ).apply { this.language = language }
     }
 
     // --- Not used: content is delivered as a whole-book EPUB ------------------
