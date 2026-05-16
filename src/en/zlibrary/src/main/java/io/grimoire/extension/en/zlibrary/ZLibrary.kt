@@ -49,7 +49,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "en",
     baseUrl = "https://z-library.bz",
-    versionCode = 4,
+    versionCode = 5,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -260,53 +260,110 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         val dlUrl = resolveAgainst(bookUrl, downloadHref)
         var lastError = "unknown error"
         repeat(MAX_RETRIES) { attempt ->
-            val request = Request.Builder().url(dlUrl)
-                .header("Referer", bookUrl)
-                .build()
-            client.newCall(request).execute().use { resp ->
-                val contentType = resp.header("Content-Type").orEmpty().lowercase()
-                val disposition = resp.header("Content-Disposition").orEmpty()
-                val isHtml = contentType.startsWith("text/html")
-                val looksLikeEpub = contentType.contains("epub") ||
-                    contentType.contains("octet-stream") ||
-                    contentType.contains("zip") ||
-                    contentType.contains("force-download") ||
-                    disposition.contains("attachment", ignoreCase = true) ||
-                    disposition.contains(".epub", ignoreCase = true)
-                when {
-                    resp.isSuccessful && looksLikeEpub && !isHtml ->
-                        return@withContext resp.body?.bytes()
-                            ?: throw IOException("Z-Library: empty download response")
-                    resp.code == 503 || resp.code == 403 ->
-                        lastError = "blocked by Cloudflare (HTTP ${resp.code})"
-                    isHtml -> {
-                        // Anonymous / over-quota responses are HTML pages; the
-                        // wording tells us which so the message is actionable.
-                        val peek = resp.peekBody(64 * 1024).string().lowercase()
-                        lastError = when {
-                            peek.contains("daily limit") || peek.contains("download limit") ||
-                                peek.contains("limit reached") ->
-                                "the daily download limit has been reached for this account"
-                            peek.contains("log in") || peek.contains("sign in") ||
-                                peek.contains("/login") ->
-                                if (email.isEmpty())
-                                    "this book requires a signed-in account — add your " +
-                                        "Z-Library credentials in Source settings"
-                                else
-                                    "the session was not accepted — re-check the " +
-                                        "email/password in Source settings"
-                            else ->
-                                "download was blocked (the server returned a web page, " +
-                                    "not a file)"
-                        }
-                    }
-                    else -> lastError = "download failed (HTTP ${resp.code})"
-                }
+            when (val r = attemptDownload(dlUrl, bookUrl)) {
+                is DlResult.File -> return@withContext r.bytes
+                is DlResult.Retry -> lastError = r.reason
+                is DlResult.Fatal -> throw IOException("Z-Library: ${r.reason}.")
             }
             if (attempt < MAX_RETRIES - 1) Thread.sleep(1500L * (attempt + 1))
         }
         throw IOException("Z-Library: $lastError.")
     }
+
+    private sealed interface DlResult {
+        class File(val bytes: ByteArray) : DlResult
+        class Retry(val reason: String) : DlResult
+        class Fatal(val reason: String) : DlResult
+    }
+
+    /**
+     * Follows the download chain from [startUrl]. Z-Library's download button
+     * can point at an interstitial that meta-refreshes or links to the real
+     * file, so HTML responses are followed (up to [MAX_HOPS]) before being
+     * classified. The page `<title>` is included in failure reasons so an
+     * unexpected page is diagnosable instead of an opaque "blocked".
+     */
+    private fun attemptDownload(startUrl: String, referer: String): DlResult {
+        var url = startUrl
+        var ref = referer
+        repeat(MAX_HOPS) {
+            val request = Request.Builder().url(url).header("Referer", ref).build()
+            client.newCall(request).execute().use { resp ->
+                val ct = resp.header("Content-Type").orEmpty().lowercase()
+                val cd = resp.header("Content-Disposition").orEmpty()
+                val isHtml = ct.startsWith("text/html") || ct.isEmpty() && resp.body == null
+                val looksLikeFile = !ct.startsWith("text/html") && (
+                    ct.contains("epub") || ct.contains("octet-stream") ||
+                        ct.contains("zip") || ct.contains("force-download") ||
+                        ct.contains("application/download") ||
+                        cd.contains("attachment", ignoreCase = true) ||
+                        cd.contains(".epub", ignoreCase = true)
+                    )
+                if (resp.isSuccessful && looksLikeFile) {
+                    val bytes = resp.body?.bytes()
+                    return if (bytes != null && bytes.isNotEmpty()) {
+                        DlResult.File(bytes)
+                    } else {
+                        DlResult.Retry("empty download response")
+                    }
+                }
+                if (resp.code == 503 || resp.code == 403) {
+                    return DlResult.Retry("blocked by Cloudflare (HTTP ${resp.code})")
+                }
+                if (!isHtml) {
+                    return DlResult.Retry("download failed (HTTP ${resp.code})")
+                }
+                val html = resp.peekBody(96 * 1024).string()
+                val lower = html.lowercase()
+                val next = nextDownloadLink(html, resp.request.url.toString())
+                if (next != null && next != url) {
+                    ref = url
+                    url = next
+                    return@use // follow the chain
+                }
+                val title = Jsoup.parse(html).title().trim()
+                    .takeIf { it.isNotEmpty() }?.let { " (page: \"$it\")" } ?: ""
+                return when {
+                    QUOTA_MARKERS.any { lower.contains(it) } -> DlResult.Fatal(
+                        "the daily download limit has been reached for this account",
+                    )
+                    email.isEmpty() && LOGIN_MARKERS.any { lower.contains(it) } -> DlResult.Fatal(
+                        "this book requires a signed-in account — add your " +
+                            "Z-Library credentials in Source settings",
+                    )
+                    LOGIN_MARKERS.any { lower.contains(it) } -> DlResult.Fatal(
+                        "the account session was not accepted — re-check the " +
+                            "email/password in Source settings$title",
+                    )
+                    else -> DlResult.Retry(
+                        "the server returned a web page, not a file$title",
+                    )
+                }
+            }
+        }
+        return DlResult.Retry("too many download redirects")
+    }
+
+    /** Extract a meta-refresh / JS / anchor target that leads to the file. */
+    private fun nextDownloadLink(html: String, baseUrl: String): String? {
+        val doc = Jsoup.parse(html, baseUrl)
+        doc.selectFirst("meta[http-equiv=refresh]")?.attr("content")
+            ?.let { Regex("url=([^;]+)", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1) }
+            ?.trim()?.trim('\'', '"')?.takeIf { it.isNotEmpty() }
+            ?.let { return absolute(baseUrl, it) }
+        Regex("""(?:window\.location(?:\.href)?|location\.href)\s*=\s*['"]([^'"]+)['"]""")
+            .find(html)?.groupValues?.get(1)?.takeIf { it.isNotEmpty() }
+            ?.let { return absolute(baseUrl, it) }
+        doc.selectFirst(
+            "a.addDownloadedBook, a.dlButton, a[href*=/dl/], a[href*=/d/], " +
+                "a[href$=.epub], a.btn[href*=download]",
+        )?.attr("href")?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { return absolute(baseUrl, it) }
+        return null
+    }
+
+    private fun absolute(base: String, href: String): String =
+        if (href.startsWith("http")) href else resolveAgainst(base, href)
 
     private fun fetchWithRetry(url: String): String? {
         repeat(MAX_RETRIES) { attempt ->
@@ -417,5 +474,15 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         private const val PREF_BASE_URL = "base_url"
         private const val PAGE_MARKER = "zlpage"
         private const val MAX_RETRIES = 3
+        private const val MAX_HOPS = 4
+
+        private val QUOTA_MARKERS = listOf(
+            "daily limit", "download limit", "limit reached", "reached the limit",
+            "downloads today", "limit of", "exceeded", "no more downloads",
+        )
+        private val LOGIN_MARKERS = listOf(
+            "log in", "sign in", "/login", "you need to log in",
+            "please log in", "authorization required", "registration",
+        )
     }
 }
