@@ -47,15 +47,15 @@ import java.io.IOException
 @SourceInfo(
     id = 6L,
     name = "Z-Library",
-    lang = "en",
+    lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 5,
+    versionCode = 6,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
     override val id = 6L
     override val name = "Z-Library"
-    override val lang = "en"
+    override val lang = "all"
 
     private val defaultBaseUrl = "https://z-library.bz"
 
