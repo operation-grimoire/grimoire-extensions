@@ -50,7 +50,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 11,
+    versionCode = 12,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
 
@@ -341,27 +341,23 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
                 val pageTitle = Jsoup.parse(html).title().trim()
                 val title = pageTitle.takeIf { it.isNotEmpty() }?.let { " (page: \"$it\")" } ?: ""
                 val finalUrl = resp.request.url
-                // Z-Library routes unauthorised/limited sessions to its online
-                // reader instead of the file. Retrying never helps — it's an
-                // authentication/entitlement state, so report it precisely.
+                // Z-Library serves its online reader (not the file) when the
+                // request lacks its first-party browser session (a JS-issued
+                // token alongside Cloudflare clearance). This is not an account
+                // issue — anonymous downloads work once that session exists.
                 val isReader = finalUrl.host.startsWith("reader.") ||
                     finalUrl.encodedPath.contains("/read/") ||
                     pageTitle.contains("reader", ignoreCase = true)
                 return when {
                     QUOTA_MARKERS.any { lower.contains(it) } -> DlResult.Fatal(
-                        "the daily download limit for this account has been reached",
+                        "the daily download limit has been reached — add a " +
+                            "Z-Library account in Source settings to raise it",
                     )
                     isReader -> DlResult.Fatal(
-                        "Z-Library served its online reader instead of a file — this " +
-                            "account isn't authorised to download this book from the " +
-                            "app. " +
-                            (if (email.isEmpty())
-                                "Add your Z-Library email/password in Source settings"
-                            else
-                                "Re-check the email/password in Source settings") +
-                            ", or sign in to Z-Library via the source's “Open in " +
-                            "WebView” (its session is shared with downloads). The " +
-                            "book may also be read-online-only for your account tier",
+                        "Z-Library returned its online reader instead of the file. " +
+                            "Its download session (a browser token) wasn't " +
+                            "established — open the source once via “Open in " +
+                            "WebView” to warm it up, then retry the download",
                     )
                     email.isEmpty() && LOGIN_MARKERS.any { lower.contains(it) } -> DlResult.Fatal(
                         "this book requires a signed-in account — add your " +
@@ -422,11 +418,20 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
         return null
     }
 
-    private fun resolveDownloadHref(doc: Document): String? =
-        doc.selectFirst(
-            "a.addDownloadedBook, a.dlButton, a.btn-default[href*=/dl/], " +
-                "a.btn-primary[href*=/dl/], a[href*=/dl/]",
-        )?.attr("href")?.trim()?.takeIf { it.isNotEmpty() }
+    // The real download button is `a.addDownloadedBook` (href=/dl/...).
+    // `a.dlButton.reader-link` is the *Read Online* link — never follow it.
+    private fun resolveDownloadHref(doc: Document): String? {
+        doc.selectFirst("a.addDownloadedBook[href]")
+            ?.attr("href")?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { return it }
+        return doc.select("a[href*=/dl/]")
+            .firstOrNull {
+                !it.hasClass("reader-link") && !it.hasClass("dlButton") &&
+                    !it.attr("href").contains("/read/") &&
+                    !it.attr("href").contains("reader.")
+            }
+            ?.attr("href")?.trim()?.takeIf { it.isNotEmpty() }
+    }
 
     // --- Optional account login ----------------------------------------------
 
@@ -455,12 +460,11 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
      * Performs the single sign-on POST against [host]. Returns `null` on
      * success or a short failure message.
      *
-     * Z-Library embeds a login modal in every page, so the presence of a
-     * password field means nothing. The authoritative success signal is the
-     * `remix_userkey` session cookie: a failed sign-in just re-renders the
-     * SSO page (HTTP 200, no auth cookie); a success sets it and redirects
-     * away from `/login`. We check the shared cookie store (the same one the
-     * downloader uses) plus the final URL.
+     * A wrong-credentials POST bounces back to the SSO page (still on
+     * `/login`, body titled "Z-Library single sign on"); a success redirects
+     * away from `/login`. Z-Library embeds a login modal site-wide and the
+     * session cookie name varies by deployment, so we key off the
+     * stayed-on-/login signal rather than a specific cookie.
      */
     private fun performLogin(host: String): String? {
         val body = FormBody.Builder()
@@ -476,24 +480,23 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource {
             .header("Origin", "https://$host")
             .post(body)
             .build()
-        val finalUrl = runCatching {
+        val (finalUrl, payload) = runCatching {
             client.newCall(request).execute().use { resp ->
-                resp.body?.string()
-                resp.request.url.toString()
+                resp.request.url.toString() to resp.body?.string().orEmpty()
             }
         }.getOrElse {
             return "couldn't reach Z-Library to sign in (${it.message ?: "network error"})"
         }
-        val cookies = runCatching {
-            android.webkit.CookieManager.getInstance().getCookie("https://$host").orEmpty()
-        }.getOrDefault("")
-        val authed = Regex("remix_userkey=[^;\\s]+").containsMatchIn(cookies) &&
-            !Regex("remix_userkey=(deleted|;|\\s|$)").containsMatchIn(cookies)
-        val redirectedAway = !finalUrl.substringBefore('?').trimEnd('/').endsWith("/login")
-        return if (authed || redirectedAway) {
-            null
-        } else {
+        val stayedOnLogin = finalUrl.substringBefore('?').trimEnd('/').endsWith("/login")
+        val ssoPage = payload.contains("single sign on", ignoreCase = true) ||
+            payload.contains("single sign-on", ignoreCase = true)
+        val rejected = payload.contains("incorrect", ignoreCase = true) ||
+            payload.contains("wrong email or password", ignoreCase = true) ||
+            payload.contains("user not found", ignoreCase = true)
+        return if (rejected || (stayedOnLogin && ssoPage)) {
             "sign-in failed — check the email/password in Source settings"
+        } else {
+            null
         }
     }
 
