@@ -193,27 +193,27 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     override suspend fun chapterListParse(response: Response): List<Chapter> {
         val doc = response.asJsoup()
         val bookId = bookId(response.request.url.toString())
+            ?: throw IOException("Webnovel: could not determine the book id")
         var index = 0
-        // Catalog rows are <li> entries containing a chapter <a>. Volume headers
-        // and other <li>s without a /book/ link are skipped.
-        return doc.select("li:has(a[href*=/book/])").mapNotNull { li ->
-            val anchor = li.selectFirst("a[href*=/book/]") ?: return@mapNotNull null
-            val href = anchor.attr("href").trim().substringBefore('?')
-            if (href.isEmpty() || href.endsWith("/catalog")) return@mapNotNull null
-            // Skip anchors that point back at the book itself rather than a chapter.
-            if (bookId != null && href.trimEnd('/').endsWith("/book/$bookId")) {
+        // A real chapter link is /book/<bookId>/<chapterId>. Restricting to this
+        // book's id keeps "recommended" / sidebar book links out of the list.
+        return doc.select("a[href*=/book/$bookId/]").mapNotNull { anchor ->
+            val href = anchor.attr("href").trim().substringBefore('?').trimEnd('/')
+            val chapterSegment = href.substringAfter("/book/$bookId/", "")
+            if (chapterSegment.isEmpty() || chapterSegment.contains('/')) {
                 return@mapNotNull null
             }
             val name = (anchor.attr("title").trim().takeIf { it.isNotEmpty() }
                 ?: anchor.text().trim())
                 .takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+            val row = anchor.ancestorLi() ?: anchor
             Chapter(
                 url = href,
                 name = name,
                 chapterNumber = parseChapterNumber(name, index++),
-                locked = li.isLockedChapter(),
+                locked = row.isLockedChapter(),
             )
-        }
+        }.distinctBy { it.url }
     }
 
     // --- Chapter content -----------------------------------------------------
