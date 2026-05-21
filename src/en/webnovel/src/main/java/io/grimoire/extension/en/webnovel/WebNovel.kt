@@ -79,10 +79,10 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     // --- Listings ------------------------------------------------------------
 
     override fun popularNovelsRequest(page: Int): Request =
-        GET("$baseUrl/stories/novel?pageIndex=$page")
+        GET("$RANKING_URL?$PAGE_MARKER=$page")
 
     override fun latestUpdatesRequest(page: Int): Request =
-        GET("$baseUrl/stories/novel?orderBy=5&pageIndex=$page")
+        GET("$LATEST_URL&$PAGE_MARKER=$page")
 
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
         val keywords = URLEncoder.encode(query.trim(), "UTF-8")
@@ -90,6 +90,11 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     }
 
     override suspend fun popularNovelsParse(response: Response): List<Novel> {
+        // The ranking/latest listings are a single server page; report page 2+
+        // as empty so the host stops paginating.
+        if (response.request.url.queryParameter(PAGE_MARKER).let { it != null && it != "1" }) {
+            return emptyList()
+        }
         val html = response.bodyText()
         // Listing cards render client-side; the embedded JSON is the reliable
         // source. Fall back to scraping in case a page is server-rendered.
@@ -304,6 +309,13 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             ?.substringAfter('=')
 
     companion object {
+        private const val PAGE_MARKER = "wnpage"
+
+        // Webnovel's mobile browse endpoints.
+        private const val RANKING_URL =
+            "https://m.webnovel.com/ranking/novel/all_time/popular_rank"
+        private const val LATEST_URL = "https://m.webnovel.com/search?keywords=latest"
+
         // Sign-out clears cookies on every host scope Webnovel may set them on.
         private val COOKIE_DOMAINS = listOf(
             "https://www.webnovel.com",
