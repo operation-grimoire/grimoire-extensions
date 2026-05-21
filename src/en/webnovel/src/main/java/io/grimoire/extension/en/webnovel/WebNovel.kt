@@ -13,46 +13,42 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONObject
 import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import java.io.IOException
 import java.net.URLEncoder
 
 /**
  * Webnovel.com (Qidian International) source.
  *
- * Webnovel gates later chapters behind a paid account ("privilege"/coins), so
- * this source implements [WebViewLoginSource]: the host opens [loginUrl] in a
- * WebView — which also covers Webnovel's social sign-in providers — and the
- * session cookies it sets are replayed automatically on this source's OkHttp
- * calls. VIP chapters are reported with [Chapter.locked] = `true` so the host
- * can show them disabled instead of failing when they are opened.
+ * Targets the mobile site `m.webnovel.com`, which is a Next.js app: every page
+ * server-renders a `<script id="__NEXT_DATA__">` JSON blob holding all the
+ * structured data. Parsing that JSON is far more stable than scraping the DOM
+ * and — crucially — exposes each chapter's `isAuth`/`isVip` flags, so VIP
+ * chapters can be reported as [Chapter.locked]. Chapter text itself is still
+ * read from the rendered chapter page.
  *
- * Webnovel's listing, book, catalog and chapter pages are all server-rendered,
- * so everything is scraped with Jsoup. The site occasionally reshuffles its
- * markup; parsing here is deliberately defensive (broad selectors with
- * fallbacks) so it degrades rather than crashes when a selector drifts.
+ * Webnovel gates later chapters behind a paid account, so this also implements
+ * [WebViewLoginSource]: the host opens [loginUrl] in a WebView (covering the
+ * social-login providers too) and the resulting session cookies are replayed
+ * on this source's requests.
  */
 @SourceInfo(
     id = 8L,
     name = "Webnovel",
     lang = "en",
-    baseUrl = "https://www.webnovel.com",
-    versionCode = 2,
+    baseUrl = "https://m.webnovel.com",
+    versionCode = 3,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
     override val id = 8L
     override val name = "Webnovel"
     override val lang = "en"
-    override val baseUrl = "https://www.webnovel.com"
+    override val baseUrl = "https://m.webnovel.com"
 
-    // --- WebViewLoginSource ---------------------------------------------------
+    // --- WebViewLoginSource --------------------------------------------------
 
-    // Webnovel's passport login page; it hosts the email/password form as well
-    // as the social-provider buttons (Google/Facebook), which redirect back to
-    // www.webnovel.com once sign-in completes.
     override val loginUrl =
         "https://passport.webnovel.com/login.html?appid=900&areaid=1" +
             "&returnurl=https%3A%2F%2Fwww.webnovel.com%2F"
@@ -61,9 +57,7 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     /**
      * Webnovel stores the signed-in user's id in the `uid` cookie; guests have
-     * it absent or `0`. Cookie inspection keeps this cheap (no network call) so
-     * the host can re-check login state freely. If Webnovel renames the cookie
-     * this is the single spot to adjust.
+     * it absent or `0`.
      */
     override suspend fun isLoggedIn(): Boolean = withContext(Dispatchers.IO) {
         val raw = CookieManager.getInstance().getCookie(baseUrl).orEmpty()
@@ -88,102 +82,58 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     // --- Listings ------------------------------------------------------------
 
     override fun popularNovelsRequest(page: Int): Request =
-        GET("$baseUrl/stories/novel?pageIndex=$page")
+        GET("$baseUrl/stories/novel?$PAGE_MARKER=$page")
 
-    // orderBy=5 is Webnovel's "most recently updated" ordering.
     override fun latestUpdatesRequest(page: Int): Request =
-        GET("$baseUrl/stories/novel?orderBy=5&pageIndex=$page")
+        GET("$baseUrl/stories/novel?$PAGE_MARKER=$page")
 
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
         val keywords = URLEncoder.encode(query.trim(), "UTF-8")
-        return GET("$baseUrl/search?keywords=$keywords&pageIndex=$page")
+        return GET("$baseUrl/search?keywords=$keywords&$PAGE_MARKER=$page")
     }
 
     override suspend fun popularNovelsParse(response: Response): List<Novel> =
-        parseBookList(response.asJsoup())
+        parseListing(response)
 
     override suspend fun latestUpdatesParse(response: Response): List<Novel> =
-        parseBookList(response.asJsoup())
+        parseListing(response)
 
     override suspend fun searchNovelsParse(response: Response): List<Novel> =
-        parseBookList(response.asJsoup())
+        parseListing(response)
 
     override fun getFilterList(): List<Filter<*>> = emptyList()
 
     /**
-     * Generic book-card extraction: every Webnovel listing/search page links to
-     * books via `/book/<slug>_<id>` anchors, so we collect those, de-duplicate
-     * by book id and pull a title + cover from the surrounding card. This is
-     * resilient to the exact list container class changing.
+     * Webnovel's mobile listing/search pages are not server-paginated, so only
+     * the first page carries results; later pages return empty so the host
+     * stops paginating.
      */
-    private fun parseBookList(doc: Document): List<Novel> {
-        val seen = mutableSetOf<String>()
-        val out = mutableListOf<Novel>()
-        for (anchor in doc.select("a[href*=/book/]")) {
-            val id = bookId(anchor.attr("href")) ?: continue
-            if (!seen.add(id)) continue
-            val card = anchor.ancestorLi() ?: anchor.parent() ?: anchor
-            val title = card.selectFirst("h2, h3, h4")?.text()?.trim()
-                ?.takeIf { it.isNotEmpty() }
-                ?: anchor.attr("title").trim().takeIf { it.isNotEmpty() }
-                ?: anchor.selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotEmpty() }
-                ?: continue
-            if (title.length < 2) continue
-            out += Novel(
-                url = "/book/$id",
-                title = title,
-                thumbnailUrl = card.selectFirst("img")?.let { imageUrl(it) },
-            )
+    private fun parseListing(response: Response): List<Novel> {
+        if (response.request.url.queryParameter(PAGE_MARKER).let { it != null && it != "1" }) {
+            return emptyList()
         }
-        return out
+        val books = nextData(response.bodyText()).optJSONObject("books")
+            ?: return emptyList()
+        return books.keys().asSequence()
+            .mapNotNull { key -> books.optJSONObject(key)?.toNovel(key) }
+            .toList()
     }
 
     // --- Novel details -------------------------------------------------------
 
     override suspend fun novelDetailsParse(response: Response): Novel {
-        val doc = response.asJsoup()
-        val pageUrl = response.request.url.toString()
-        fun meta(prop: String) = doc.selectFirst(
-            "meta[property=og:$prop], meta[name=$prop], meta[name=og:$prop]",
-        )?.attr("content")?.trim()?.takeIf { it.isNotEmpty() }
-
-        // og:title is "<Title> - <Genre> - Webnovel"; prefer the page heading.
-        val title = doc.selectFirst("h1, .pt4.pb4.oh h1, .det-info h1")?.text()?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?: meta("title")?.substringBefore(" - ")?.trim()
-            ?: "Webnovel book"
-        val description = doc.selectFirst(".j_synopsis, .det-content p, .g_txt_over")
-            ?.text()?.trim()?.takeIf { it.isNotEmpty() }
-            ?: meta("description")
-        val author = doc.selectFirst(
-            ".det-info .c_s a, address .c_s, a[href*=/profile/], .det-info .pt4 a",
-        )?.text()?.trim()?.removePrefix("Author:")?.trim()?.takeIf { it.isNotEmpty() }
-        val cover = doc.selectFirst(".det-hd-img img, .g_thumb img, .det-info img")
-            ?.let { imageUrl(it) }
-            ?: meta("image")
-        val genres = doc.select(".det-hd-detail a[href*=/category], .m-tags a, .det-tag a")
-            .map { it.text().trim() }
-            .filter { it.isNotEmpty() }
-            .distinct()
-        val status = doc.select(".det-hd-detail, .det-info, ._mn small, .det-hd-detail strong")
-            .joinToString(" ") { it.text() }
-            .toNovelStatus()
-
-        return Novel(
-            url = bookId(pageUrl)?.let { "/book/$it" } ?: pageUrl,
-            title = title,
-            thumbnailUrl = cover,
-            author = author,
-            description = description,
-            genres = genres,
-            status = status,
-            initialized = true,
-        )
+        val html = response.bodyText()
+        val id = bookId(response.request.url.toString())
+            ?: throw IOException("Webnovel: invalid book URL")
+        val book = nextData(html).optJSONObject("books")?.optJSONObject(id)
+            ?: throw IOException("Webnovel: book details not found")
+        val novel = book.toNovel(id)
+            ?: throw IOException("Webnovel: book details not found")
+        return novel.copy(status = statusFrom(html), initialized = true)
     }
 
     // --- Chapter list --------------------------------------------------------
 
-    // The book page does not list chapters; the dedicated catalog page does.
     override fun chapterListRequest(novel: Novel): Request {
         val id = bookId(novel.url)
             ?: throw IOException("Webnovel: could not determine the book id")
@@ -191,38 +141,34 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     }
 
     override suspend fun chapterListParse(response: Response): List<Chapter> {
-        val doc = response.asJsoup()
-        val bookId = bookId(response.request.url.toString())
+        val id = bookId(response.request.url.toString())
             ?: throw IOException("Webnovel: could not determine the book id")
-        var index = 0
-        // A real chapter link is /book/<bookId>/<chapterId>. Restricting to this
-        // book's id keeps "recommended" / sidebar book links out of the list.
-        return doc.select("a[href*=/book/$bookId/]").mapNotNull { anchor ->
-            val href = anchor.attr("href").trim().substringBefore('?').trimEnd('/')
-            val chapterSegment = href.substringAfter("/book/$bookId/", "")
-            if (chapterSegment.isEmpty() || chapterSegment.contains('/')) {
-                return@mapNotNull null
+        val chapters = nextData(response.bodyText()).optJSONObject("chapter")
+            ?: throw IOException("Webnovel: chapter list not found")
+        return chapters.keys().asSequence()
+            .mapNotNull { cid -> chapters.optJSONObject(cid)?.let { cid to it } }
+            .sortedBy { (_, ch) -> ch.optInt("chapterIndex", 0) }
+            .map { (cid, ch) ->
+                Chapter(
+                    url = "/book/$id/$cid",
+                    name = ch.optString("chapterName").trim()
+                        .ifEmpty { "Chapter ${ch.optInt("chapterIndex")}" },
+                    chapterNumber = ch.optInt("chapterIndex", 0).toFloat(),
+                    uploadDate = ch.optLong("publishTime", 0L),
+                    // isAuth = 0 means this account cannot read the chapter yet.
+                    locked = ch.optInt("isAuth", 1) == 0,
+                )
             }
-            val name = (anchor.attr("title").trim().takeIf { it.isNotEmpty() }
-                ?: anchor.text().trim())
-                .takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-            val row = anchor.ancestorLi() ?: anchor
-            Chapter(
-                url = href,
-                name = name,
-                chapterNumber = parseChapterNumber(name, index++),
-                locked = row.isLockedChapter(),
-            )
-        }.distinctBy { it.url }
+            .toList()
     }
 
     // --- Chapter content -----------------------------------------------------
 
     override suspend fun pageListParse(response: Response): List<NovelPage> {
-        val doc = response.asJsoup()
+        val doc = Jsoup.parse(response.bodyText(), response.request.url.toString())
         val paragraphs = doc.select(
             ".cha-words p, .cha-content p, .j_chapterWrapper p, " +
-                "._content p, .chapter_content p, .dib.pr p",
+                "[class*=chapter_content] p, [class*=chapterContent] p, .dib.pr p",
         ).map { it.text().trim() }.filter { it.isNotEmpty() }
 
         if (paragraphs.isEmpty()) {
@@ -236,28 +182,59 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     // --- Helpers -------------------------------------------------------------
 
-    private fun Response.asJsoup(): Document =
-        Jsoup.parse(body?.string().orEmpty(), request.url.toString())
-
-    /** Nearest enclosing `<li>` ancestor, or null. */
-    private fun Element.ancestorLi(): Element? =
-        generateSequence(parent()) { it.parent() }.firstOrNull { it.tagName() == "li" }
+    private fun Response.bodyText(): String = body?.string().orEmpty()
 
     /**
-     * Webnovel marks VIP/locked catalog rows with a lock glyph — an inline
-     * `<svg><use href="#i-lock…">` or an element whose class mentions "lock".
+     * Extracts `props.initialState` from a Next.js page's `__NEXT_DATA__` blob.
+     * Next.js escapes `<`/`>` inside that JSON, so the first `</script>` after
+     * the tag is reliably its terminator.
      */
-    private fun Element.isLockedChapter(): Boolean {
-        val lockedSvg = select("svg use").any { use ->
-            (use.attr("xlink:href") + " " + use.attr("href")).contains("lock", ignoreCase = true)
-        }
-        if (lockedSvg) return true
-        return select("i, span, em, svg").any {
-            it.className().contains("lock", ignoreCase = true)
-        }
+    private fun nextData(html: String): JSONObject {
+        val marker = html.indexOf("id=\"__NEXT_DATA__\"")
+        if (marker < 0) throw IOException("Webnovel: page data not found (blocked?)")
+        val start = html.indexOf('>', marker) + 1
+        val end = html.indexOf("</script>", start)
+        if (start <= 0 || end < 0) throw IOException("Webnovel: page data not found")
+        return JSONObject(html.substring(start, end))
+            .getJSONObject("props")
+            .getJSONObject("initialState")
     }
 
-    /** Pulls the numeric book id out of any `/book/<slug>_<id>` style URL. */
+    /** Builds a [Novel] from a `books` entry in the Next.js state. */
+    private fun JSONObject.toNovel(fallbackId: String? = null): Novel? {
+        val id = optString("bookId").takeIf { it.isNotEmpty() }
+            ?: fallbackId
+            ?: return null
+        val title = optString("bookName").ifEmpty { optString("name") }.trim()
+        if (title.isEmpty()) return null
+        val tags = optJSONArray("tagInfos")
+        val genres = if (tags != null) {
+            (0 until tags.length()).mapNotNull {
+                tags.optJSONObject(it)?.optString("tagName")?.trim()?.takeIf(String::isNotEmpty)
+            }
+        } else {
+            emptyList()
+        }
+        return Novel(
+            url = "/book/$id",
+            title = title,
+            thumbnailUrl = "https://book-pic.webnovel.com/bookcover/$id",
+            author = optString("authorName").trim().takeIf { it.isNotEmpty() },
+            description = optString("description").trim().takeIf { it.isNotEmpty() },
+            genres = genres,
+        )
+    }
+
+    /** The mobile book page prints "Ongoing · N Views" / "Completed · N Views". */
+    private fun statusFrom(html: String): NovelStatus = when {
+        Regex(""">\s*Completed\s*&middot;|>\s*Completed\s*·""").containsMatchIn(html) ->
+            NovelStatus.COMPLETED
+        Regex(""">\s*Ongoing\s*&middot;|>\s*Ongoing\s*·""").containsMatchIn(html) ->
+            NovelStatus.ONGOING
+        else -> NovelStatus.UNKNOWN
+    }
+
+    /** Pulls the numeric book id out of any `/book/<id>` style URL. */
     private fun bookId(url: String): String? {
         val segment = url.substringBefore('?')
             .substringAfter("/book/", "")
@@ -267,30 +244,6 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             .takeIf { it.isNotEmpty() }
     }
 
-    private fun imageUrl(img: Element): String? {
-        val raw = listOf("data-original", "data-src", "src")
-            .map { img.attr(it).trim() }
-            .firstOrNull { it.isNotEmpty() } ?: return null
-        return when {
-            raw.startsWith("http") -> raw
-            raw.startsWith("//") -> "https:$raw"
-            raw.startsWith("/") -> "$baseUrl$raw"
-            else -> raw
-        }
-    }
-
-    private fun parseChapterNumber(name: String, fallbackIndex: Int): Float {
-        val match = CHAPTER_NUMBER.find(name)?.groupValues?.get(1)
-        return match?.toFloatOrNull() ?: (fallbackIndex + 1).toFloat()
-    }
-
-    private fun String.toNovelStatus(): NovelStatus = when {
-        contains("Completed", ignoreCase = true) -> NovelStatus.COMPLETED
-        contains("Hiatus", ignoreCase = true) -> NovelStatus.HIATUS
-        contains("Ongoing", ignoreCase = true) -> NovelStatus.ONGOING
-        else -> NovelStatus.UNKNOWN
-    }
-
     private fun cookieValue(rawCookies: String, name: String): String? =
         rawCookies.split(';')
             .map { it.trim() }
@@ -298,13 +251,13 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             ?.substringAfter('=')
 
     companion object {
-        private val CHAPTER_NUMBER =
-            Regex("""(?:chapter|chap|ch|episode|ep)\.?\s*(\d+(?:\.\d+)?)""", RegexOption.IGNORE_CASE)
+        private const val PAGE_MARKER = "wnpage"
 
-        // Sign-out clears cookies on every host scope Webnovel may have set them on.
+        // Sign-out clears cookies on every host scope Webnovel may set them on.
         private val COOKIE_DOMAINS = listOf(
             "https://www.webnovel.com",
             "https://webnovel.com",
+            "https://m.webnovel.com",
             "https://passport.webnovel.com",
         )
     }
