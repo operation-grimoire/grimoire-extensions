@@ -38,7 +38,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 11,
+    versionCode = 12,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -96,14 +96,10 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             return emptyList()
         }
         val html = response.bodyText()
-
-        // Ranking pages emit the ordered list as a JSON-LD ItemList block —
-        // the one part that does not depend on client-side rendering.
-        rankedFromJsonLd(html).takeIf { it.isNotEmpty() }?.let { return it }
-
         val doc = Jsoup.parse(html, response.request.url.toString())
-        // Ranked entries are also tagged data-report-uiname="bookcover".
-        doc.select("a[data-report-uiname=bookcover]").mapNotNull { anchor ->
+
+        val jsonLd = rankedFromJsonLd(html)
+        val byCover = doc.select("a[data-report-uiname=bookcover]").mapNotNull { anchor ->
             val id = anchor.attr("data-report-did").filter(Char::isDigit)
                 .takeIf { it.isNotEmpty() }
                 ?: bookId(anchor.attr("href"))
@@ -112,10 +108,20 @@ class WebNovel : HttpSource(), WebViewLoginSource {
                 ?: anchor.selectFirst("h2, h3, h4")?.text()?.trim()
                 ?: return@mapNotNull null
             Novel(url = "/book/$id", title = title, thumbnailUrl = coverUrl(id))
-        }.distinctBy { it.url }.takeIf { it.isNotEmpty() }?.let { return it }
+        }.distinctBy { it.url }
+        val fromData = booksFromNextData(html)
 
-        // Non-ranking listing pages: entity store, then generic scraping.
-        return booksFromNextData(html).ifEmpty { parseBookList(doc) }
+        // TEMPORARY DIAGNOSTIC: surface what the extension actually receives so
+        // the wrong-popular-list issue can be pinned down from a screenshot.
+        val diag = Novel(
+            url = "/diag",
+            title = "DIAG final=${response.request.url} len=${html.length} " +
+                "ld=${"itemListElement" in html} cover=${byCover.size} " +
+                "nextdata=${"__NEXT_DATA__" in html} jsonld=${jsonLd.size} " +
+                "data=${fromData.size}",
+        )
+        val result = jsonLd.ifEmpty { byCover }.ifEmpty { fromData.ifEmpty { parseBookList(doc) } }
+        return listOf(diag) + result
     }
 
     /**
