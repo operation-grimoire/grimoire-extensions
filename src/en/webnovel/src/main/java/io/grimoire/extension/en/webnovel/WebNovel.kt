@@ -38,7 +38,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://m.webnovel.com",
-    versionCode = 3,
+    versionCode = 4,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -121,6 +121,10 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     // --- Novel details -------------------------------------------------------
 
+    // The catalog page's __NEXT_DATA__ carries the full book record (and the
+    // chapter list), so details and chapters are both read from it.
+    override fun novelDetailsRequest(novel: Novel): Request = chapterListRequest(novel)
+
     override suspend fun novelDetailsParse(response: Response): Novel {
         val html = response.bodyText()
         val id = bookId(response.request.url.toString())
@@ -185,9 +189,10 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     private fun Response.bodyText(): String = body?.string().orEmpty()
 
     /**
-     * Extracts `props.initialState` from a Next.js page's `__NEXT_DATA__` blob.
-     * Next.js escapes `<`/`>` inside that JSON, so the first `</script>` after
-     * the tag is reliably its terminator.
+     * Extracts the data store from a Next.js page's `__NEXT_DATA__` blob.
+     * Webnovel keeps its entities (`books`, `chapter`, …) under
+     * `props.initialState.entities`. Next.js escapes `<`/`>` inside that JSON,
+     * so the first `</script>` after the tag is reliably its terminator.
      */
     private fun nextData(html: String): JSONObject {
         val marker = html.indexOf("id=\"__NEXT_DATA__\"")
@@ -195,9 +200,10 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         val start = html.indexOf('>', marker) + 1
         val end = html.indexOf("</script>", start)
         if (start <= 0 || end < 0) throw IOException("Webnovel: page data not found")
-        return JSONObject(html.substring(start, end))
+        val initialState = JSONObject(html.substring(start, end))
             .getJSONObject("props")
             .getJSONObject("initialState")
+        return initialState.optJSONObject("entities") ?: initialState
     }
 
     /** Builds a [Novel] from a `books` entry in the Next.js state. */
