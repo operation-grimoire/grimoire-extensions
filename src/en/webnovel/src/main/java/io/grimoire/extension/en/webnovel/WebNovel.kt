@@ -38,7 +38,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 5,
+    versionCode = 8,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -261,19 +261,34 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     // --- Chapter content -----------------------------------------------------
 
     override suspend fun pageListParse(response: Response): List<NovelPage> {
-        val doc = response.asJsoup()
-        val paragraphs = doc.select(
-            ".cha-words p, .cha-content p, .j_chapterWrapper p, " +
-                "[class*=chapter_content] p, [class*=chapterContent] p, .dib.pr p",
-        ).map { it.text().trim() }.filter { it.isNotEmpty() }
+        val html = response.bodyText()
+        val url = response.request.url.toString()
 
-        if (paragraphs.isEmpty()) {
-            throw IOException(
-                "Webnovel: this chapter's content is locked. Sign in with an " +
-                    "account that has unlocked it (Source settings → Account).",
-            )
+        // Chapter text lives in __NEXT_DATA__ at entities.chapter[id].contents:
+        // an array of paragraphs whose `content` is a small HTML fragment.
+        val contents = nextDataChapter(html, url)?.optJSONArray("contents")
+        if (contents != null && contents.length() > 0) {
+            val pages = (0 until contents.length()).mapNotNull { i ->
+                val fragment = contents.optJSONObject(i)?.optString("content").orEmpty()
+                Jsoup.parse(fragment).text().trim().takeIf { it.isNotEmpty() }
+            }
+            if (pages.isNotEmpty()) {
+                return pages.mapIndexed { i, text -> NovelPage(i, text) }
+            }
         }
-        return paragraphs.mapIndexed { i, text -> NovelPage(i, text) }
+
+        // Fallback for any server-rendered layout.
+        val scraped = Jsoup.parse(html, url)
+            .select(".cha-words p, .cha-content p, .j_chapterWrapper p")
+            .map { it.text().trim() }.filter { it.isNotEmpty() }
+        if (scraped.isNotEmpty()) {
+            return scraped.mapIndexed { i, text -> NovelPage(i, text) }
+        }
+
+        throw IOException(
+            "Webnovel: this chapter's content is locked. Sign in with an " +
+                "account that has unlocked it (Source settings → Account).",
+        )
     }
 
     // --- Helpers -------------------------------------------------------------
@@ -309,6 +324,17 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     /** The single book record for [id] from a page's `__NEXT_DATA__`. */
     private fun nextDataBook(html: String, id: String): JSONObject? =
         nextDataBooks(html)?.optJSONObject(id)
+
+    /** The chapter record for the chapter in [url] from a page's `__NEXT_DATA__`. */
+    private fun nextDataChapter(html: String, url: String): JSONObject? = runCatching {
+        val chapters = nextDataState(html)
+            .optJSONObject("entities")?.optJSONObject("chapter") ?: return null
+        val cid = url.substringBefore('?').trimEnd('/').substringAfterLast('/')
+        chapters.optJSONObject(cid)
+            ?: chapters.keys().asSequence()
+                .mapNotNull { chapters.optJSONObject(it) }
+                .firstOrNull { it.optJSONArray("contents") != null }
+    }.getOrNull()
 
     /** Webnovel prints "Ongoing · N Views" / "Completed · N Views" in the header. */
     private fun statusFromHtml(html: String): NovelStatus =
