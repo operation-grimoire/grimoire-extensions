@@ -38,7 +38,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 10,
+    versionCode = 11,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -96,10 +96,14 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             return emptyList()
         }
         val html = response.bodyText()
+
+        // Ranking pages emit the ordered list as a JSON-LD ItemList block —
+        // the one part that does not depend on client-side rendering.
+        rankedFromJsonLd(html).takeIf { it.isNotEmpty() }?.let { return it }
+
         val doc = Jsoup.parse(html, response.request.url.toString())
-        // Ranking pages tag every ranked entry with data-report-uiname=
-        // "bookcover", already laid out in rank order.
-        val ranked = doc.select("a[data-report-uiname=bookcover]").mapNotNull { anchor ->
+        // Ranked entries are also tagged data-report-uiname="bookcover".
+        doc.select("a[data-report-uiname=bookcover]").mapNotNull { anchor ->
             val id = anchor.attr("data-report-did").filter(Char::isDigit)
                 .takeIf { it.isNotEmpty() }
                 ?: bookId(anchor.attr("href"))
@@ -108,11 +112,55 @@ class WebNovel : HttpSource(), WebViewLoginSource {
                 ?: anchor.selectFirst("h2, h3, h4")?.text()?.trim()
                 ?: return@mapNotNull null
             Novel(url = "/book/$id", title = title, thumbnailUrl = coverUrl(id))
-        }.distinctBy { it.url }
-        if (ranked.isNotEmpty()) return ranked
+        }.distinctBy { it.url }.takeIf { it.isNotEmpty() }?.let { return it }
+
         // Non-ranking listing pages: entity store, then generic scraping.
         return booksFromNextData(html).ifEmpty { parseBookList(doc) }
     }
+
+    /**
+     * Ranking pages list their books, in rank order, as a schema.org JSON-LD
+     * `ItemList`. Titles are filled from the page's entity store when present,
+     * otherwise derived from the book URL slug.
+     */
+    private fun rankedFromJsonLd(html: String): List<Novel> {
+        val titles = nextDataBooks(html)
+        val ranked = mutableListOf<Pair<Int, Novel>>()
+        var from = 0
+        while (true) {
+            val tag = html.indexOf("application/ld+json", from)
+            if (tag < 0) break
+            val open = html.indexOf('>', tag) + 1
+            val close = html.indexOf("</script>", open)
+            if (open <= 0 || close < 0) break
+            from = close + 1
+            val items = runCatching {
+                JSONObject(html.substring(open, close)).optJSONArray("itemListElement")
+            }.getOrNull() ?: continue
+            for (i in 0 until items.length()) {
+                val item = items.optJSONObject(i) ?: continue
+                val bookUrl = item.optString("url")
+                val id = bookId(bookUrl) ?: continue
+                val title = titles?.optJSONObject(id)
+                    ?.let { it.optString("bookName").ifEmpty { it.optString("name") } }
+                    ?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: titleFromBookUrl(bookUrl)
+                ranked += item.optInt("position", i + 1) to
+                    Novel(url = "/book/$id", title = title, thumbnailUrl = coverUrl(id))
+            }
+        }
+        return ranked.sortedBy { it.first }.map { it.second }.distinctBy { it.url }
+    }
+
+    /** Best-effort title from a `/book/<slug>_<id>` URL when no better source. */
+    private fun titleFromBookUrl(url: String): String {
+        val slug = url.substringBefore('?').substringAfterLast("/book/").substringBeforeLast('_')
+        return runCatching { java.net.URLDecoder.decode(slug, "UTF-8") }.getOrDefault(slug)
+            .split('-').filter { it.isNotBlank() }
+            .joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
+            .ifBlank { "Webnovel book" }
+    }
+
 
     override suspend fun latestUpdatesParse(response: Response): List<Novel> =
         popularNovelsParse(response)
