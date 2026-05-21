@@ -112,16 +112,19 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     private fun parseBookList(doc: Document): List<Novel> {
         val seen = mutableSetOf<String>()
         val out = mutableListOf<Novel>()
-        for (anchor in doc.select("a[href*=/book/]")) {
-            val id = bookId(anchor.attr("href")) ?: continue
+        // Cards expose the book id via the href or a data-* attribute.
+        for (anchor in doc.select("a[href*=/book/], a[data-report-bid], a[data-bid]")) {
+            val id = bookId(anchor.attr("href"))
+                ?: anchor.attr("data-report-bid").filter(Char::isDigit).takeIf { it.isNotEmpty() }
+                ?: anchor.attr("data-bid").filter(Char::isDigit).takeIf { it.isNotEmpty() }
+                ?: continue
             if (!seen.add(id)) continue
             val card = anchor.ancestorLi() ?: anchor.parent() ?: anchor
-            val title = card.selectFirst("h2, h3, h4")?.text()?.trim()
-                ?.takeIf { it.isNotEmpty() }
-                ?: anchor.attr("title").trim().takeIf { it.isNotEmpty() }
-                ?: anchor.selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotEmpty() }
-                ?: continue
-            if (title.length < 2) continue
+            val title = sequenceOf(
+                anchor.attr("title"),
+                card.selectFirst("h2, h3, h4, [class*=title], [class*=name]")?.text(),
+                anchor.selectFirst("img")?.attr("alt"),
+            ).mapNotNull { it?.trim() }.firstOrNull { it.length >= 2 } ?: continue
             out += Novel(url = "/book/$id", title = title, thumbnailUrl = coverUrl(id))
         }
         return out
@@ -206,7 +209,6 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         val doc = response.asJsoup()
         val bookId = bookId(response.request.url.toString())
             ?: throw IOException("Webnovel: could not determine the book id")
-        var index = 0
         // A real chapter link is /book/<bookId>/<chapterId>. Restricting to this
         // book's id keeps "recommended" / sidebar book links out of the list.
         return doc.select("a[href*=/book/$bookId/]").mapNotNull { anchor ->
@@ -222,11 +224,15 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             Chapter(
                 url = href,
                 name = name,
-                chapterNumber = parseChapterNumber(name, index++),
                 // VIP/locked rows carry a lock <svg>; free rows have none.
                 locked = anchor.selectFirst("svg") != null,
             )
-        }.distinctBy { it.url }
+        }
+            .distinctBy { it.url }
+            // The catalog lists chapters in reading order; number them by that
+            // position. Webnovel titles are arbitrary, so they cannot be parsed
+            // for a chapter number.
+            .mapIndexed { i, ch -> ch.copy(chapterNumber = (i + 1).toFloat()) }
     }
 
     // --- Chapter content -----------------------------------------------------
@@ -284,12 +290,6 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             .takeIf { it.isNotEmpty() }
     }
 
-    private fun parseChapterNumber(name: String, fallbackIndex: Int): Float {
-        CHAPTER_NUMBER.find(name)?.groupValues?.get(1)?.toFloatOrNull()?.let { return it }
-        name.trimStart().takeWhile { it.isDigit() }.toFloatOrNull()?.let { return it }
-        return (fallbackIndex + 1).toFloat()
-    }
-
     private fun String.toNovelStatus(): NovelStatus = when {
         contains("Completed", ignoreCase = true) -> NovelStatus.COMPLETED
         contains("Hiatus", ignoreCase = true) -> NovelStatus.HIATUS
@@ -304,9 +304,6 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             ?.substringAfter('=')
 
     companion object {
-        private val CHAPTER_NUMBER =
-            Regex("""(?:chapter|chap|episode)\.?\s*(\d+(?:\.\d+)?)""", RegexOption.IGNORE_CASE)
-
         // Sign-out clears cookies on every host scope Webnovel may set them on.
         private val COOKIE_DOMAINS = listOf(
             "https://www.webnovel.com",
