@@ -38,7 +38,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 5,
+    versionCode = 8,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -79,10 +79,10 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     // --- Listings ------------------------------------------------------------
 
     override fun popularNovelsRequest(page: Int): Request =
-        GET("$baseUrl/stories/novel?pageIndex=$page")
+        GET("$RANKING_URL?$PAGE_MARKER=$page")
 
     override fun latestUpdatesRequest(page: Int): Request =
-        GET("$baseUrl/stories/novel?orderBy=5&pageIndex=$page")
+        GET("$LATEST_URL&$PAGE_MARKER=$page")
 
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
         val keywords = URLEncoder.encode(query.trim(), "UTF-8")
@@ -90,6 +90,11 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     }
 
     override suspend fun popularNovelsParse(response: Response): List<Novel> {
+        // The ranking/latest listings are a single server page; report page 2+
+        // as empty so the host stops paginating.
+        if (response.request.url.queryParameter(PAGE_MARKER).let { it != null && it != "1" }) {
+            return emptyList()
+        }
         val html = response.bodyText()
         // Listing cards render client-side; the embedded JSON is the reliable
         // source. Fall back to scraping in case a page is server-rendered.
@@ -132,11 +137,7 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     /** Book extraction from a Next.js page's `__NEXT_DATA__` entity store. */
     private fun booksFromNextData(html: String): List<Novel> {
-        val books = runCatching {
-            val state = nextDataState(html)
-            state.optJSONObject("entities")?.optJSONObject("books")
-                ?: state.optJSONObject("books")
-        }.getOrNull() ?: return emptyList()
+        val books = nextDataBooks(html) ?: return emptyList()
         val out = mutableListOf<Novel>()
         for (key in books.keys()) {
             val book = books.optJSONObject(key) ?: continue
@@ -157,41 +158,63 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     // --- Novel details -------------------------------------------------------
 
+    // The catalog page embeds the full book record (description, tags, score)
+    // in its __NEXT_DATA__, so novel details are sourced from there.
+    override fun novelDetailsRequest(novel: Novel): Request = chapterListRequest(novel)
+
     override suspend fun novelDetailsParse(response: Response): Novel {
-        val doc = response.asJsoup()
+        val html = response.bodyText()
         val pageUrl = response.request.url.toString()
         val id = bookId(pageUrl)
+
+        val book = id?.let { nextDataBook(html, it) }
+        if (book != null) {
+            val tags = book.optJSONArray("tagInfos")
+            val genres = buildList {
+                book.optString("categoryName").trim().takeIf { it.isNotEmpty() }?.let { add(it) }
+                if (tags != null) for (i in 0 until tags.length()) {
+                    tags.optJSONObject(i)?.optString("tagName")?.trim()
+                        ?.takeIf { t -> t.isNotEmpty() }?.let { add(it) }
+                }
+            }.distinct()
+            val score = book.optDouble("totalScore", Double.NaN)
+            return Novel(
+                url = "/book/$id",
+                title = book.optString("bookName").ifEmpty { book.optString("name") }.trim()
+                    .ifEmpty { "Webnovel book" },
+                thumbnailUrl = coverUrl(id),
+                author = book.optString("authorName").trim().takeIf { it.isNotEmpty() },
+                description = book.optString("description").trim().takeIf { it.isNotEmpty() },
+                genres = genres,
+                status = statusFromHtml(html),
+                rating = score.takeIf { !it.isNaN() && it > 0 }?.toFloat(),
+                ratingCount = book.optInt("voters", 0).takeIf { it > 0 },
+                initialized = true,
+            )
+        }
+
+        // Fallback: scrape the page if the embedded data is unavailable.
+        val doc = Jsoup.parse(html, pageUrl)
         fun meta(prop: String) = doc.selectFirst(
             "meta[property=og:$prop], meta[name=$prop], meta[name=og:$prop]",
         )?.attr("content")?.trim()?.takeIf { it.isNotEmpty() }
-
-        val title = doc.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotEmpty() }
-            ?: meta("title")?.substringBefore(" - ")?.trim()
-            ?: "Webnovel book"
-        val description = doc.selectFirst(
-            ".j_synopsis, [class*=synopsis], .det-content p, .g_txt_over",
-        )?.text()?.trim()?.takeIf { it.isNotEmpty() }
-            ?: meta("description")
-        val author = doc.selectFirst(
-            "a[href*=/profile/], .det-info .c_s a, address .c_s, [class*=author] a",
-        )?.text()?.trim()?.removePrefix("Author:")?.trim()?.takeIf { it.isNotEmpty() }
-        val genres = doc.select("a[href*=/tags/], a[href*=/category], .m-tags a")
-            .map { it.text().trim() }
-            .filter { it.isNotEmpty() && it.length < 30 }
-            .distinct()
-            .take(12)
-        val status = doc.select(
-            ".det-hd-detail, .det-info, ._mn small, [class*=_meta], [class*=status]",
-        ).joinToString(" ") { it.text() }.toNovelStatus()
-
         return Novel(
             url = id?.let { "/book/$it" } ?: pageUrl,
-            title = title,
+            title = doc.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotEmpty() }
+                ?: meta("title")?.substringBefore(" - ")?.trim()
+                ?: "Webnovel book",
             thumbnailUrl = id?.let { coverUrl(it) } ?: meta("image"),
-            author = author,
-            description = description,
-            genres = genres,
-            status = status,
+            author = doc.selectFirst("a[href*=/profile/], [class*=author] a")
+                ?.text()?.trim()?.removePrefix("Author:")?.trim()?.takeIf { it.isNotEmpty() },
+            description = doc.selectFirst(".j_synopsis, [class*=synopsis], [class*=description]")
+                ?.text()?.trim()?.takeIf { it.isNotEmpty() }
+                ?: meta("description"),
+            genres = doc.select("a[href*=/tags/], a[href*=/category]")
+                .map { it.text().trim() }
+                .filter { it.isNotEmpty() && it.length < 30 }
+                .distinct()
+                .take(12),
+            status = statusFromHtml(html),
             initialized = true,
         )
     }
@@ -238,19 +261,34 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     // --- Chapter content -----------------------------------------------------
 
     override suspend fun pageListParse(response: Response): List<NovelPage> {
-        val doc = response.asJsoup()
-        val paragraphs = doc.select(
-            ".cha-words p, .cha-content p, .j_chapterWrapper p, " +
-                "[class*=chapter_content] p, [class*=chapterContent] p, .dib.pr p",
-        ).map { it.text().trim() }.filter { it.isNotEmpty() }
+        val html = response.bodyText()
+        val url = response.request.url.toString()
 
-        if (paragraphs.isEmpty()) {
-            throw IOException(
-                "Webnovel: this chapter's content is locked. Sign in with an " +
-                    "account that has unlocked it (Source settings → Account).",
-            )
+        // Chapter text lives in __NEXT_DATA__ at entities.chapter[id].contents:
+        // an array of paragraphs whose `content` is a small HTML fragment.
+        val contents = nextDataChapter(html, url)?.optJSONArray("contents")
+        if (contents != null && contents.length() > 0) {
+            val pages = (0 until contents.length()).mapNotNull { i ->
+                val fragment = contents.optJSONObject(i)?.optString("content").orEmpty()
+                Jsoup.parse(fragment).text().trim().takeIf { it.isNotEmpty() }
+            }
+            if (pages.isNotEmpty()) {
+                return pages.mapIndexed { i, text -> NovelPage(i, text) }
+            }
         }
-        return paragraphs.mapIndexed { i, text -> NovelPage(i, text) }
+
+        // Fallback for any server-rendered layout.
+        val scraped = Jsoup.parse(html, url)
+            .select(".cha-words p, .cha-content p, .j_chapterWrapper p")
+            .map { it.text().trim() }.filter { it.isNotEmpty() }
+        if (scraped.isNotEmpty()) {
+            return scraped.mapIndexed { i, text -> NovelPage(i, text) }
+        }
+
+        throw IOException(
+            "Webnovel: this chapter's content is locked. Sign in with an " +
+                "account that has unlocked it (Source settings → Account).",
+        )
     }
 
     // --- Helpers -------------------------------------------------------------
@@ -275,6 +313,34 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             .getJSONObject("props")
             .getJSONObject("initialState")
     }
+
+    /** The `books` entity map (id -> book record) from a page's `__NEXT_DATA__`. */
+    private fun nextDataBooks(html: String): JSONObject? = runCatching {
+        val state = nextDataState(html)
+        state.optJSONObject("entities")?.optJSONObject("books")
+            ?: state.optJSONObject("books")
+    }.getOrNull()
+
+    /** The single book record for [id] from a page's `__NEXT_DATA__`. */
+    private fun nextDataBook(html: String, id: String): JSONObject? =
+        nextDataBooks(html)?.optJSONObject(id)
+
+    /** The chapter record for the chapter in [url] from a page's `__NEXT_DATA__`. */
+    private fun nextDataChapter(html: String, url: String): JSONObject? = runCatching {
+        val chapters = nextDataState(html)
+            .optJSONObject("entities")?.optJSONObject("chapter") ?: return null
+        val cid = url.substringBefore('?').trimEnd('/').substringAfterLast('/')
+        chapters.optJSONObject(cid)
+            ?: chapters.keys().asSequence()
+                .mapNotNull { chapters.optJSONObject(it) }
+                .firstOrNull { it.optJSONArray("contents") != null }
+    }.getOrNull()
+
+    /** Webnovel prints "Ongoing · N Views" / "Completed · N Views" in the header. */
+    private fun statusFromHtml(html: String): NovelStatus =
+        Regex(""">\s*(Completed|Ongoing|Hiatus)\s*[·•]""").find(html)
+            ?.groupValues?.get(1)?.toNovelStatus()
+            ?: NovelStatus.UNKNOWN
 
     /** Nearest enclosing `<li>` ancestor, or null. */
     private fun Element.ancestorLi(): Element? =
@@ -304,6 +370,13 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             ?.substringAfter('=')
 
     companion object {
+        private const val PAGE_MARKER = "wnpage"
+
+        // Webnovel's mobile browse endpoints.
+        private const val RANKING_URL =
+            "https://m.webnovel.com/ranking/novel/all_time/popular_rank"
+        private const val LATEST_URL = "https://m.webnovel.com/search?keywords=latest"
+
         // Sign-out clears cookies on every host scope Webnovel may set them on.
         private val COOKIE_DOMAINS = listOf(
             "https://www.webnovel.com",
