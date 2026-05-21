@@ -41,7 +41,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 18,
+    versionCode = 19,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -141,9 +141,9 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         for (filter in filters) when (filter) {
             is ParamFilter -> filter.codes[filter.state].takeIf { it != OMIT }
                 ?.let { params.append('&').append(filter.param).append('=').append(it) }
-            is Filter.TriState -> when (filter.state) {
-                Filter.TriState.STATE_INCLUDE -> tagNameToId[filter.name]?.let { include += it }
-                Filter.TriState.STATE_EXCLUDE -> tagNameToId[filter.name]?.let { exclude += it }
+            is Filter.Group<*> -> for (tag in triStatesOf(filter)) when (tag.state) {
+                Filter.TriState.STATE_INCLUDE -> tagNameToId[tag.name]?.let { include += it }
+                Filter.TriState.STATE_EXCLUDE -> tagNameToId[tag.name]?.let { exclude += it }
             }
             else -> Unit
         }
@@ -310,9 +310,14 @@ class WebNovel : HttpSource(), WebViewLoginSource {
                 intArrayOf(0, 3, 7, 30),
             ),
         )
+        if (tagGroups.isNotEmpty()) add(Filter.Header("Tags"))
         for ((group, tags) in tagGroups) {
-            add(Filter.Header(group))
-            for ((tagName, _) in tags) add(Filter.TriState(tagName))
+            add(
+                TagGroup(
+                    group.replaceFirstChar(Char::uppercase),
+                    tags.map { (tagName, _) -> Filter.TriState(tagName) },
+                ),
+            )
         }
     }
 
@@ -365,11 +370,15 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         }
     }
 
+    private fun triStatesOf(group: Filter.Group<*>): List<Filter.TriState> =
+        (group.state as? List<*>).orEmpty().filterIsInstance<Filter.TriState>()
+
     // The advanced search returns nothing without a tag, so only a tag
     // selection switches search out of plain keyword mode. The other filters
     // refine a tag search but cannot drive one on their own.
     private fun filterActive(filter: Filter<*>): Boolean =
-        filter is Filter.TriState && filter.state != Filter.TriState.STATE_IGNORE
+        filter is Filter.Group<*> &&
+            triStatesOf(filter).any { it.state != Filter.TriState.STATE_IGNORE }
 
     /** Builds a JSON-API request with the headers Webnovel's XHR endpoints expect. */
     private fun apiRequest(url: String): Request {
@@ -399,6 +408,10 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         labels: Array<String>,
         val codes: IntArray,
     ) : Filter.Select<String>(name, labels)
+
+    /** A searchable group of advanced-search tag include/exclude toggles. */
+    private class TagGroup(name: String, tags: List<Filter<*>>) :
+        Filter.Group<Filter<*>>(name, tags)
 
     /** Book-card extraction from a server-rendered listing page. */
     private fun parseBookList(doc: Document): List<Novel> {
