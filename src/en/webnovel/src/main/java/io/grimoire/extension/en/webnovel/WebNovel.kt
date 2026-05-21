@@ -38,7 +38,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 13,
+    versionCode = 14,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -84,18 +84,11 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     // --- Listings ------------------------------------------------------------
 
-    // The ranking only honours ?pageIndex for crawlers (its own code does
-    // `isBot && pageIndex || 1`); page 2+ is fetched with a crawler UA, while
-    // page 1 keeps the normal request so it can never regress.
+    // Webnovel server-renders only the first ranking page for ordinary
+    // requests (?pageIndex is honoured for crawlers only), so Popular caps at
+    // the top page; the cross-page dedup guard ends the list cleanly.
     override fun popularNovelsRequest(page: Int): Request =
-        if (page <= 1) {
-            GET(RANKING_URL)
-        } else {
-            Request.Builder()
-                .url("$RANKING_URL?pageIndex=$page")
-                .header("User-Agent", CRAWLER_UA)
-                .build()
-        }
+        GET("$RANKING_URL?pageIndex=$page")
 
     override fun latestUpdatesRequest(page: Int): Request =
         GET("$LATEST_URL&pageIndex=$page")
@@ -458,11 +451,6 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         private const val RANKING_URL =
             "https://m.webnovel.com/ranking/novel/bi_annual/power_rank"
         private const val LATEST_URL = "https://m.webnovel.com/search?keywords=latest"
-
-        // The ranking server-renders ?pageIndex only for crawlers, so deeper
-        // ranking pages are requested with a crawler user-agent.
-        private const val CRAWLER_UA =
-            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 
         // Sign-out clears cookies on every host scope Webnovel may set them on.
         private val COOKIE_DOMAINS = listOf(
