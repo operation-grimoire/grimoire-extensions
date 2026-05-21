@@ -38,7 +38,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 12,
+    versionCode = 13,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -84,8 +84,10 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     // --- Listings ------------------------------------------------------------
 
+    // The ranking ignores ?pageIndex; its page number is a trailing path
+    // segment (.../power_rank/2). Page 1 keeps the bare, known-good URL.
     override fun popularNovelsRequest(page: Int): Request =
-        GET("$RANKING_URL?pageIndex=$page")
+        GET(if (page <= 1) RANKING_URL else "$RANKING_URL/$page")
 
     override fun latestUpdatesRequest(page: Int): Request =
         GET("$LATEST_URL&pageIndex=$page")
@@ -351,8 +353,12 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     private fun Response.bodyText(): String = body?.string().orEmpty()
 
-    private fun requestedPage(response: Response): Int =
-        response.request.url.queryParameter("pageIndex")?.toIntOrNull() ?: 1
+    private fun requestedPage(response: Response): Int {
+        val url = response.request.url
+        url.queryParameter("pageIndex")?.toIntOrNull()?.let { return it }
+        // Ranking pages carry the page number as the last path segment.
+        return url.pathSegments.lastOrNull()?.toIntOrNull() ?: 1
+    }
 
     /**
      * Keeps only books not already returned for this listing. Webnovel listing
