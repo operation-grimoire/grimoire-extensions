@@ -38,7 +38,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 11,
+    versionCode = 12,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -46,6 +46,12 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     override val name = "Webnovel"
     override val lang = "en"
     override val baseUrl = "https://www.webnovel.com"
+
+    // Book urls already returned for the current listing, so paging never
+    // repeats one (reset whenever page 1 is requested).
+    private val popularSeen = HashSet<String>()
+    private val latestSeen = HashSet<String>()
+    private val searchSeen = HashSet<String>()
 
     // --- WebViewLoginSource --------------------------------------------------
 
@@ -79,10 +85,10 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     // --- Listings ------------------------------------------------------------
 
     override fun popularNovelsRequest(page: Int): Request =
-        GET("$RANKING_URL?$PAGE_MARKER=$page")
+        GET("$RANKING_URL?pageIndex=$page")
 
     override fun latestUpdatesRequest(page: Int): Request =
-        GET("$LATEST_URL&$PAGE_MARKER=$page")
+        GET("$LATEST_URL&pageIndex=$page")
 
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
         val keywords = URLEncoder.encode(query.trim(), "UTF-8")
@@ -90,32 +96,13 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     }
 
     override suspend fun popularNovelsParse(response: Response): List<Novel> {
-        // The ranking/latest listings are a single server page; report page 2+
-        // as empty so the host stops paginating.
-        if (response.request.url.queryParameter(PAGE_MARKER).let { it != null && it != "1" }) {
-            return emptyList()
-        }
         val html = response.bodyText()
-
-        // Ranking pages emit the ordered list as a JSON-LD ItemList block —
-        // the one part that does not depend on client-side rendering.
-        rankedFromJsonLd(html).takeIf { it.isNotEmpty() }?.let { return it }
-
-        val doc = Jsoup.parse(html, response.request.url.toString())
-        // Ranked entries are also tagged data-report-uiname="bookcover".
-        doc.select("a[data-report-uiname=bookcover]").mapNotNull { anchor ->
-            val id = anchor.attr("data-report-did").filter(Char::isDigit)
-                .takeIf { it.isNotEmpty() }
-                ?: bookId(anchor.attr("href"))
-                ?: return@mapNotNull null
-            val title = anchor.attr("title").trim().takeIf { it.isNotEmpty() }
-                ?: anchor.selectFirst("h2, h3, h4")?.text()?.trim()
-                ?: return@mapNotNull null
-            Novel(url = "/book/$id", title = title, thumbnailUrl = coverUrl(id))
-        }.distinctBy { it.url }.takeIf { it.isNotEmpty() }?.let { return it }
-
-        // Non-ranking listing pages: entity store, then generic scraping.
-        return booksFromNextData(html).ifEmpty { parseBookList(doc) }
+        // Ranking pages emit the ordered list as a JSON-LD ItemList block.
+        val books = rankedFromJsonLd(html).ifEmpty {
+            val doc = Jsoup.parse(html, response.request.url.toString())
+            booksFromNextData(html).ifEmpty { parseBookList(doc) }
+        }
+        return paginate(popularSeen, requestedPage(response), books)
     }
 
     /**
@@ -163,12 +150,16 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
 
     override suspend fun latestUpdatesParse(response: Response): List<Novel> =
-        popularNovelsParse(response)
+        parseSearchListing(response, latestSeen)
 
-    override suspend fun searchNovelsParse(response: Response): List<Novel> {
+    override suspend fun searchNovelsParse(response: Response): List<Novel> =
+        parseSearchListing(response, searchSeen)
+
+    private fun parseSearchListing(response: Response, seen: MutableSet<String>): List<Novel> {
         val html = response.bodyText()
-        return parseBookList(Jsoup.parse(html, response.request.url.toString()))
+        val books = parseBookList(Jsoup.parse(html, response.request.url.toString()))
             .ifEmpty { booksFromNextData(html) }
+        return paginate(seen, requestedPage(response), books)
     }
 
     override fun getFilterList(): List<Filter<*>> = emptyList()
@@ -360,6 +351,20 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     private fun Response.bodyText(): String = body?.string().orEmpty()
 
+    private fun requestedPage(response: Response): Int =
+        response.request.url.queryParameter("pageIndex")?.toIntOrNull() ?: 1
+
+    /**
+     * Keeps only books not already returned for this listing. Webnovel listing
+     * pages re-serve page 1 when they do not support the page param, so this
+     * both de-duplicates and lets an exhausted/repeated page end pagination.
+     */
+    private fun paginate(seen: MutableSet<String>, page: Int, novels: List<Novel>): List<Novel> =
+        synchronized(seen) {
+            if (page <= 1) seen.clear()
+            novels.filter { seen.add(it.url) }
+        }
+
     private fun Response.asJsoup(): Document =
         Jsoup.parse(bodyText(), request.url.toString())
 
@@ -435,8 +440,6 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             ?.substringAfter('=')
 
     companion object {
-        private const val PAGE_MARKER = "wnpage"
-
         private const val LOCKED_MESSAGE =
             "Webnovel: this chapter is locked — its full content requires a " +
                 "signed-in account that has unlocked it (Source settings → Account)."
