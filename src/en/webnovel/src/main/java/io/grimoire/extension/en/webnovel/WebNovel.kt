@@ -39,7 +39,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 1,
+    versionCode = 2,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
