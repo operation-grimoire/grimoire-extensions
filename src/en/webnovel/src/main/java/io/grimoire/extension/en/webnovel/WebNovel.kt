@@ -137,11 +137,7 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     /** Book extraction from a Next.js page's `__NEXT_DATA__` entity store. */
     private fun booksFromNextData(html: String): List<Novel> {
-        val books = runCatching {
-            val state = nextDataState(html)
-            state.optJSONObject("entities")?.optJSONObject("books")
-                ?: state.optJSONObject("books")
-        }.getOrNull() ?: return emptyList()
+        val books = nextDataBooks(html) ?: return emptyList()
         val out = mutableListOf<Novel>()
         for (key in books.keys()) {
             val book = books.optJSONObject(key) ?: continue
@@ -162,41 +158,63 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     // --- Novel details -------------------------------------------------------
 
+    // The catalog page embeds the full book record (description, tags, score)
+    // in its __NEXT_DATA__, so novel details are sourced from there.
+    override fun novelDetailsRequest(novel: Novel): Request = chapterListRequest(novel)
+
     override suspend fun novelDetailsParse(response: Response): Novel {
-        val doc = response.asJsoup()
+        val html = response.bodyText()
         val pageUrl = response.request.url.toString()
         val id = bookId(pageUrl)
+
+        val book = id?.let { nextDataBook(html, it) }
+        if (book != null) {
+            val tags = book.optJSONArray("tagInfos")
+            val genres = buildList {
+                book.optString("categoryName").trim().takeIf { it.isNotEmpty() }?.let { add(it) }
+                if (tags != null) for (i in 0 until tags.length()) {
+                    tags.optJSONObject(i)?.optString("tagName")?.trim()
+                        ?.takeIf { t -> t.isNotEmpty() }?.let { add(it) }
+                }
+            }.distinct()
+            val score = book.optDouble("totalScore", Double.NaN)
+            return Novel(
+                url = "/book/$id",
+                title = book.optString("bookName").ifEmpty { book.optString("name") }.trim()
+                    .ifEmpty { "Webnovel book" },
+                thumbnailUrl = coverUrl(id),
+                author = book.optString("authorName").trim().takeIf { it.isNotEmpty() },
+                description = book.optString("description").trim().takeIf { it.isNotEmpty() },
+                genres = genres,
+                status = statusFromHtml(html),
+                rating = score.takeIf { !it.isNaN() && it > 0 }?.toFloat(),
+                ratingCount = book.optInt("voters", 0).takeIf { it > 0 },
+                initialized = true,
+            )
+        }
+
+        // Fallback: scrape the page if the embedded data is unavailable.
+        val doc = Jsoup.parse(html, pageUrl)
         fun meta(prop: String) = doc.selectFirst(
             "meta[property=og:$prop], meta[name=$prop], meta[name=og:$prop]",
         )?.attr("content")?.trim()?.takeIf { it.isNotEmpty() }
-
-        val title = doc.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotEmpty() }
-            ?: meta("title")?.substringBefore(" - ")?.trim()
-            ?: "Webnovel book"
-        val description = doc.selectFirst(
-            ".j_synopsis, [class*=synopsis], .det-content p, .g_txt_over",
-        )?.text()?.trim()?.takeIf { it.isNotEmpty() }
-            ?: meta("description")
-        val author = doc.selectFirst(
-            "a[href*=/profile/], .det-info .c_s a, address .c_s, [class*=author] a",
-        )?.text()?.trim()?.removePrefix("Author:")?.trim()?.takeIf { it.isNotEmpty() }
-        val genres = doc.select("a[href*=/tags/], a[href*=/category], .m-tags a")
-            .map { it.text().trim() }
-            .filter { it.isNotEmpty() && it.length < 30 }
-            .distinct()
-            .take(12)
-        val status = doc.select(
-            ".det-hd-detail, .det-info, ._mn small, [class*=_meta], [class*=status]",
-        ).joinToString(" ") { it.text() }.toNovelStatus()
-
         return Novel(
             url = id?.let { "/book/$it" } ?: pageUrl,
-            title = title,
+            title = doc.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotEmpty() }
+                ?: meta("title")?.substringBefore(" - ")?.trim()
+                ?: "Webnovel book",
             thumbnailUrl = id?.let { coverUrl(it) } ?: meta("image"),
-            author = author,
-            description = description,
-            genres = genres,
-            status = status,
+            author = doc.selectFirst("a[href*=/profile/], [class*=author] a")
+                ?.text()?.trim()?.removePrefix("Author:")?.trim()?.takeIf { it.isNotEmpty() },
+            description = doc.selectFirst(".j_synopsis, [class*=synopsis], [class*=description]")
+                ?.text()?.trim()?.takeIf { it.isNotEmpty() }
+                ?: meta("description"),
+            genres = doc.select("a[href*=/tags/], a[href*=/category]")
+                .map { it.text().trim() }
+                .filter { it.isNotEmpty() && it.length < 30 }
+                .distinct()
+                .take(12),
+            status = statusFromHtml(html),
             initialized = true,
         )
     }
@@ -280,6 +298,23 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             .getJSONObject("props")
             .getJSONObject("initialState")
     }
+
+    /** The `books` entity map (id -> book record) from a page's `__NEXT_DATA__`. */
+    private fun nextDataBooks(html: String): JSONObject? = runCatching {
+        val state = nextDataState(html)
+        state.optJSONObject("entities")?.optJSONObject("books")
+            ?: state.optJSONObject("books")
+    }.getOrNull()
+
+    /** The single book record for [id] from a page's `__NEXT_DATA__`. */
+    private fun nextDataBook(html: String, id: String): JSONObject? =
+        nextDataBooks(html)?.optJSONObject(id)
+
+    /** Webnovel prints "Ongoing · N Views" / "Completed · N Views" in the header. */
+    private fun statusFromHtml(html: String): NovelStatus =
+        Regex(""">\s*(Completed|Ongoing|Hiatus)\s*[·•]""").find(html)
+            ?.groupValues?.get(1)?.toNovelStatus()
+            ?: NovelStatus.UNKNOWN
 
     /** Nearest enclosing `<li>` ancestor, or null. */
     private fun Element.ancestorLi(): Element? =
