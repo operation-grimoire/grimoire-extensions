@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
@@ -38,7 +39,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 14,
+    versionCode = 15,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -52,6 +53,11 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     private val popularSeen = HashSet<String>()
     private val latestSeen = HashSet<String>()
     private val searchSeen = HashSet<String>()
+
+    // Query string for the ranking scroll API, captured from the first
+    // ranking page's __NEXT_DATA__; null until that page has been parsed.
+    @Volatile
+    private var rankApiQuery: String? = null
 
     // --- WebViewLoginSource --------------------------------------------------
 
@@ -84,11 +90,28 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     // --- Listings ------------------------------------------------------------
 
-    // Webnovel server-renders only the first ranking page for ordinary
-    // requests (?pageIndex is honoured for crawlers only), so Popular caps at
-    // the top page; the cross-page dedup guard ends the list cleanly.
-    override fun popularNovelsRequest(page: Int): Request =
-        GET("$RANKING_URL?pageIndex=$page")
+    // Page 1 is the server-rendered ranking page. Webnovel ignores ?pageIndex
+    // there for ordinary requests, so deeper pages are fetched from the
+    // ranking's own scroll API, parameterised from page 1's __NEXT_DATA__.
+    override fun popularNovelsRequest(page: Int): Request {
+        val query = rankApiQuery
+        if (page <= 1 || query == null) {
+            return GET("$RANKING_URL?pageIndex=$page")
+        }
+        val csrf = runCatching {
+            cookieValue(CookieManager.getInstance().getCookie(RANKING_URL).orEmpty(), "_csrfToken")
+        }.getOrNull()
+        val url = buildString {
+            append(RANKING_API).append('?').append(query).append("&pageIndex=").append(page)
+            if (!csrf.isNullOrBlank()) append("&_csrfToken=").append(csrf)
+        }
+        return Request.Builder()
+            .url(url)
+            .header("Referer", "$RANKING_URL?pageIndex=$page")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Accept", "application/json")
+            .build()
+    }
 
     override fun latestUpdatesRequest(page: Int): Request =
         GET("$LATEST_URL&pageIndex=$page")
@@ -99,13 +122,61 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     }
 
     override suspend fun popularNovelsParse(response: Response): List<Novel> {
-        val html = response.bodyText()
-        // Ranking pages emit the ordered list as a JSON-LD ItemList block.
-        val books = rankedFromJsonLd(html).ifEmpty {
-            val doc = Jsoup.parse(html, response.request.url.toString())
-            booksFromNextData(html).ifEmpty { parseBookList(doc) }
+        val body = response.bodyText()
+        // Deeper pages are the JSON scroll API; page 1 is the rendered page.
+        if (response.request.url.toString().contains("getRankList")) {
+            return paginate(popularSeen, requestedPage(response), rankApiBooks(body))
         }
+        // Ranking pages emit the ordered list as a JSON-LD ItemList block.
+        val books = rankedFromJsonLd(body).ifEmpty {
+            val doc = Jsoup.parse(body, response.request.url.toString())
+            booksFromNextData(body).ifEmpty { parseBookList(doc) }
+        }
+        captureRankApiQuery(body)
         return paginate(popularSeen, requestedPage(response), books)
+    }
+
+    /** Books from a `getRankList` scroll-API JSON response. */
+    private fun rankApiBooks(json: String): List<Novel> {
+        val root = runCatching { JSONObject(json) }.getOrNull() ?: return emptyList()
+        val items = findBookArray(root) ?: return emptyList()
+        val out = mutableListOf<Novel>()
+        for (i in 0 until items.length()) {
+            val item = items.optJSONObject(i) ?: continue
+            val id = item.optString("bookId").ifEmpty { item.optString("id") }
+                .filter(Char::isDigit)
+            if (id.isEmpty()) continue
+            val title = item.optString("bookName").ifEmpty { item.optString("name") }.trim()
+            if (title.length < 2) continue
+            out += Novel(url = "/book/$id", title = title, thumbnailUrl = coverUrl(id))
+        }
+        return out
+    }
+
+    /**
+     * Captures the ranking scroll-API parameters from the first ranking
+     * page's `__NEXT_DATA__`. The page records the exact query it rendered
+     * with, so the parameters never need to be hard-coded.
+     */
+    private fun captureRankApiQuery(html: String) {
+        val root = runCatching { nextDataRoot(html) }.getOrNull() ?: return
+        val query = findObject(root) {
+            it.has("rankId") && it.has("timeType") && it.has("signStatus")
+        } ?: return
+        val params = StringBuilder()
+        for (key in query.keys()) {
+            if (key == "pageIndex") continue
+            val value = query.opt(key)
+            if (value == null || value is JSONObject || value is JSONArray) continue
+            if (params.isNotEmpty()) params.append('&')
+            params.append(key).append('=')
+                .append(URLEncoder.encode(value.toString(), "UTF-8"))
+        }
+        // getRankList also sends sourceType, mirroring bookType.
+        query.opt("bookType")?.let {
+            params.append("&sourceType=").append(URLEncoder.encode(it.toString(), "UTF-8"))
+        }
+        if (params.isNotEmpty()) rankApiQuery = params.toString()
     }
 
     /**
@@ -375,16 +446,52 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     private fun coverUrl(bookId: String): String =
         "https://book-pic.webnovel.com/bookcover/$bookId"
 
-    /** Extracts `props.initialState` from a Next.js `__NEXT_DATA__` blob. */
-    private fun nextDataState(html: String): JSONObject {
+    /** Parses the raw `__NEXT_DATA__` JSON blob of a Next.js page. */
+    private fun nextDataRoot(html: String): JSONObject {
         val marker = html.indexOf("id=\"__NEXT_DATA__\"")
         if (marker < 0) throw IOException("no __NEXT_DATA__")
         val start = html.indexOf('>', marker) + 1
         val end = html.indexOf("</script>", start)
         if (start <= 0 || end < 0) throw IOException("malformed __NEXT_DATA__")
         return JSONObject(html.substring(start, end))
-            .getJSONObject("props")
-            .getJSONObject("initialState")
+    }
+
+    /** Extracts `props.initialState` from a Next.js `__NEXT_DATA__` blob. */
+    private fun nextDataState(html: String): JSONObject =
+        nextDataRoot(html).getJSONObject("props").getJSONObject("initialState")
+
+    /** Depth-first search for a nested object satisfying [match]. */
+    private fun findObject(node: Any?, match: (JSONObject) -> Boolean): JSONObject? {
+        when (node) {
+            is JSONObject -> {
+                if (match(node)) return node
+                for (key in node.keys()) findObject(node.opt(key), match)?.let { return it }
+            }
+            is JSONArray -> for (i in 0 until node.length()) {
+                findObject(node.opt(i), match)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /** Depth-first search for the first array of book records. */
+    private fun findBookArray(node: Any?): JSONArray? {
+        when (node) {
+            is JSONArray -> {
+                val first = node.optJSONObject(0)
+                if (first != null &&
+                    (first.has("bookId") || first.has("id")) &&
+                    (first.has("bookName") || first.has("name"))
+                ) {
+                    return node
+                }
+                for (i in 0 until node.length()) findBookArray(node.opt(i))?.let { return it }
+            }
+            is JSONObject -> for (key in node.keys()) {
+                findBookArray(node.opt(key))?.let { return it }
+            }
+        }
+        return null
     }
 
     /** The `books` entity map (id -> book record) from a page's `__NEXT_DATA__`. */
@@ -450,6 +557,8 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         // Webnovel's mobile browse endpoints.
         private const val RANKING_URL =
             "https://m.webnovel.com/ranking/novel/bi_annual/power_rank"
+        private const val RANKING_API =
+            "https://m.webnovel.com/go/pcm/category/getRankList"
         private const val LATEST_URL = "https://m.webnovel.com/search?keywords=latest"
 
         // Sign-out clears cookies on every host scope Webnovel may set them on.
