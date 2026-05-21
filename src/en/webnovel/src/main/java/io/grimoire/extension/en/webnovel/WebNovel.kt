@@ -10,6 +10,8 @@ import io.grimoire.api.network.HttpSource
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.source.WebViewLoginSource
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import okhttp3.Response
@@ -39,7 +41,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 16,
+    versionCode = 17,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -59,12 +61,15 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     @Volatile
     private var rankApiQuery: String? = null
 
-    // Advanced-search tag taxonomy, loaded on demand by fetchFilterOptions().
+    // Advanced-search tag taxonomy, fetched once per session by
+    // fetchFilterOptions() and cached for the rest of the session.
     @Volatile
     private var tagGroups: List<Pair<String, List<Pair<String, String>>>> = emptyList()
 
     @Volatile
     private var tagNameToId: Map<String, String> = emptyMap()
+
+    private val tagMutex = Mutex()
 
     // --- WebViewLoginSource --------------------------------------------------
 
@@ -311,15 +316,20 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         }
     }
 
+    // Double-checked lock: a burst of filter-sheet opens hits the network once.
     override suspend fun fetchFilterOptions(): List<Filter<*>> = withContext(Dispatchers.IO) {
-        runCatching {
-            val body = client.newCall(apiRequest("$TAG_LIST_API?categoryType=1&sex=1"))
-                .execute().use { it.bodyText() }
-            val groups = mutableListOf<Pair<String, List<Pair<String, String>>>>()
-            collectTagGroups(JSONObject(body), groups)
-            if (groups.isNotEmpty()) {
-                tagGroups = groups
-                tagNameToId = groups.flatMap { it.second }.toMap()
+        if (tagGroups.isEmpty()) {
+            tagMutex.withLock {
+                if (tagGroups.isEmpty()) runCatching {
+                    val body = client.newCall(apiRequest("$TAG_LIST_API?categoryType=1&sex=1"))
+                        .execute().use { it.bodyText() }
+                    val groups = mutableListOf<Pair<String, List<Pair<String, String>>>>()
+                    collectTagGroups(JSONObject(body), groups)
+                    if (groups.isNotEmpty()) {
+                        tagGroups = groups
+                        tagNameToId = groups.flatMap { it.second }.toMap()
+                    }
+                }
             }
         }
         getFilterList()
