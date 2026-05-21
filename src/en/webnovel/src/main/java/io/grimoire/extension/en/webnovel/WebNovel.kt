@@ -38,7 +38,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 9,
+    versionCode = 10,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -96,10 +96,22 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             return emptyList()
         }
         val html = response.bodyText()
-        // Listing cards render client-side; the embedded JSON is the reliable
-        // source. Fall back to scraping in case a page is server-rendered.
-        return booksFromNextData(html)
-            .ifEmpty { parseBookList(Jsoup.parse(html, response.request.url.toString())) }
+        val doc = Jsoup.parse(html, response.request.url.toString())
+        // Ranking pages tag every ranked entry with data-report-uiname=
+        // "bookcover", already laid out in rank order.
+        val ranked = doc.select("a[data-report-uiname=bookcover]").mapNotNull { anchor ->
+            val id = anchor.attr("data-report-did").filter(Char::isDigit)
+                .takeIf { it.isNotEmpty() }
+                ?: bookId(anchor.attr("href"))
+                ?: return@mapNotNull null
+            val title = anchor.attr("title").trim().takeIf { it.isNotEmpty() }
+                ?: anchor.selectFirst("h2, h3, h4")?.text()?.trim()
+                ?: return@mapNotNull null
+            Novel(url = "/book/$id", title = title, thumbnailUrl = coverUrl(id))
+        }.distinctBy { it.url }
+        if (ranked.isNotEmpty()) return ranked
+        // Non-ranking listing pages: entity store, then generic scraping.
+        return booksFromNextData(html).ifEmpty { parseBookList(doc) }
     }
 
     override suspend fun latestUpdatesParse(response: Response): List<Novel> =
