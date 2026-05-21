@@ -41,7 +41,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 19,
+    versionCode = 20,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -128,12 +128,17 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     override fun latestUpdatesRequest(page: Int): Request =
         GET("$LATEST_URL&pageIndex=$page")
 
-    // A bare query runs Webnovel's keyword search. Once any filter is set the
+    // A bare query runs Webnovel's keyword search. Once a tag is set the
     // request switches to the advanced tag search, which ignores keywords.
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
         if (filters.none(::filterActive)) {
-            val keywords = URLEncoder.encode(query.trim(), "UTF-8")
-            return GET("$baseUrl/search?keywords=$keywords&pageIndex=$page")
+            val keywords = query.trim()
+            // The advanced search needs a tag and the keyword search needs a
+            // keyword; with neither, browse the ranking so filtering without a
+            // tag still shows books instead of an empty screen.
+            if (keywords.isEmpty()) return popularNovelsRequest(page)
+            val encoded = URLEncoder.encode(keywords, "UTF-8")
+            return GET("$baseUrl/search?keywords=$encoded&pageIndex=$page")
         }
         val include = mutableListOf<String>()
         val exclude = mutableListOf<String>()
@@ -153,11 +158,14 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         return apiRequest("$SEARCH_API?$params")
     }
 
-    override suspend fun popularNovelsParse(response: Response): List<Novel> {
+    override suspend fun popularNovelsParse(response: Response): List<Novel> =
+        parseRanking(response, popularSeen)
+
+    private fun parseRanking(response: Response, seen: MutableSet<String>): List<Novel> {
         val body = response.bodyText()
         // Deeper pages are the JSON scroll API; page 1 is the rendered page.
         if (response.request.url.toString().contains("getRankList")) {
-            return paginate(popularSeen, requestedPage(response), apiBooks(body))
+            return paginate(seen, requestedPage(response), apiBooks(body))
         }
         // Ranking pages emit the ordered list as a JSON-LD ItemList block.
         val books = rankedFromJsonLd(body).ifEmpty {
@@ -165,7 +173,7 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             booksFromNextData(body).ifEmpty { parseBookList(doc) }
         }
         captureRankApiQuery(body)
-        return paginate(popularSeen, requestedPage(response), books)
+        return paginate(seen, requestedPage(response), books)
     }
 
     /** Books from a Webnovel JSON list API (getRankList / get-search-list). */
@@ -259,9 +267,14 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         parseSearchListing(response, latestSeen)
 
     override suspend fun searchNovelsParse(response: Response): List<Novel> {
+        val url = response.request.url.toString()
         // The advanced tag search returns JSON; keyword search returns a page.
-        if (response.request.url.toString().contains("get-search-list")) {
+        if (url.contains("get-search-list")) {
             return paginate(searchSeen, requestedPage(response), apiBooks(response.bodyText()))
+        }
+        // A no-tag, no-keyword filter falls back to the ranking listing.
+        if (url.contains("getRankList") || url.contains("/ranking/")) {
+            return parseRanking(response, searchSeen)
         }
         return parseSearchListing(response, searchSeen)
     }
@@ -278,6 +291,12 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     override val hasDynamicFilters: Boolean = true
 
     override fun getFilterList(): List<Filter<*>> = buildList {
+        add(
+            Filter.Header(
+                "Select one or more tags to search. Sort, Status and the " +
+                    "other filters only refine a tag search.",
+            ),
+        )
         add(
             ParamFilter(
                 "Content type", "categoryType",
@@ -306,8 +325,8 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         add(
             ParamFilter(
                 "Updated", "newChapterTime",
-                arrayOf("Any", "Within 3 days", "Within 7 days", "Within 30 days"),
-                intArrayOf(0, 3, 7, 30),
+                arrayOf("Any", "Within 7 days", "Within 15 days", "Within 30 days"),
+                intArrayOf(0, 7, 15, 30),
             ),
         )
         if (tagGroups.isNotEmpty()) add(Filter.Header("Tags"))
