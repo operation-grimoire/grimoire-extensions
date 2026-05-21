@@ -38,7 +38,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 8,
+    versionCode = 9,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -263,10 +263,18 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     override suspend fun pageListParse(response: Response): List<NovelPage> {
         val html = response.bodyText()
         val url = response.request.url.toString()
+        val chapter = nextDataChapter(html, url)
+
+        // A locked VIP chapter still ships a short teaser in `contents`. Refuse
+        // it so the reader shows the locked notice instead of a misleading
+        // preview that just stops a few paragraphs in.
+        if (chapter != null && chapter.optInt("isAuth", 1) == 0) {
+            throw IOException(LOCKED_MESSAGE)
+        }
 
         // Chapter text lives in __NEXT_DATA__ at entities.chapter[id].contents:
         // an array of paragraphs whose `content` is a small HTML fragment.
-        val contents = nextDataChapter(html, url)?.optJSONArray("contents")
+        val contents = chapter?.optJSONArray("contents")
         if (contents != null && contents.length() > 0) {
             val pages = (0 until contents.length()).mapNotNull { i ->
                 val fragment = contents.optJSONObject(i)?.optString("content").orEmpty()
@@ -285,10 +293,7 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             return scraped.mapIndexed { i, text -> NovelPage(i, text) }
         }
 
-        throw IOException(
-            "Webnovel: this chapter's content is locked. Sign in with an " +
-                "account that has unlocked it (Source settings → Account).",
-        )
+        throw IOException(LOCKED_MESSAGE)
     }
 
     // --- Helpers -------------------------------------------------------------
@@ -372,9 +377,13 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     companion object {
         private const val PAGE_MARKER = "wnpage"
 
+        private const val LOCKED_MESSAGE =
+            "Webnovel: this chapter is locked — its full content requires a " +
+                "signed-in account that has unlocked it (Source settings → Account)."
+
         // Webnovel's mobile browse endpoints.
         private const val RANKING_URL =
-            "https://m.webnovel.com/ranking/novel/all_time/popular_rank"
+            "https://m.webnovel.com/ranking/novel/bi_annual/power_rank"
         private const val LATEST_URL = "https://m.webnovel.com/search?keywords=latest"
 
         // Sign-out clears cookies on every host scope Webnovel may set them on.
