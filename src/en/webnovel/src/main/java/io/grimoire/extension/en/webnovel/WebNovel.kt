@@ -39,7 +39,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 15,
+    versionCode = 16,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -58,6 +58,13 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     // ranking page's __NEXT_DATA__; null until that page has been parsed.
     @Volatile
     private var rankApiQuery: String? = null
+
+    // Advanced-search tag taxonomy, loaded on demand by fetchFilterOptions().
+    @Volatile
+    private var tagGroups: List<Pair<String, List<Pair<String, String>>>> = emptyList()
+
+    @Volatile
+    private var tagNameToId: Map<String, String> = emptyMap()
 
     // --- WebViewLoginSource --------------------------------------------------
 
@@ -116,16 +123,36 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     override fun latestUpdatesRequest(page: Int): Request =
         GET("$LATEST_URL&pageIndex=$page")
 
+    // A bare query runs Webnovel's keyword search. Once any filter is set the
+    // request switches to the advanced tag search, which ignores keywords.
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
-        val keywords = URLEncoder.encode(query.trim(), "UTF-8")
-        return GET("$baseUrl/search?keywords=$keywords&pageIndex=$page")
+        if (filters.none(::filterActive)) {
+            val keywords = URLEncoder.encode(query.trim(), "UTF-8")
+            return GET("$baseUrl/search?keywords=$keywords&pageIndex=$page")
+        }
+        val include = mutableListOf<String>()
+        val exclude = mutableListOf<String>()
+        val params = StringBuilder("sex=1")
+        for (filter in filters) when (filter) {
+            is ParamFilter -> filter.codes[filter.state].takeIf { it != OMIT }
+                ?.let { params.append('&').append(filter.param).append('=').append(it) }
+            is Filter.TriState -> when (filter.state) {
+                Filter.TriState.STATE_INCLUDE -> tagNameToId[filter.name]?.let { include += it }
+                Filter.TriState.STATE_EXCLUDE -> tagNameToId[filter.name]?.let { exclude += it }
+            }
+            else -> Unit
+        }
+        if (include.isNotEmpty()) params.append("&tagId=").append(include.joinToString(","))
+        if (exclude.isNotEmpty()) params.append("&negTagId=").append(exclude.joinToString(","))
+        params.append("&pageIndex=").append(page)
+        return apiRequest("$SEARCH_API?$params")
     }
 
     override suspend fun popularNovelsParse(response: Response): List<Novel> {
         val body = response.bodyText()
         // Deeper pages are the JSON scroll API; page 1 is the rendered page.
         if (response.request.url.toString().contains("getRankList")) {
-            return paginate(popularSeen, requestedPage(response), rankApiBooks(body))
+            return paginate(popularSeen, requestedPage(response), apiBooks(body))
         }
         // Ranking pages emit the ordered list as a JSON-LD ItemList block.
         val books = rankedFromJsonLd(body).ifEmpty {
@@ -136,8 +163,8 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         return paginate(popularSeen, requestedPage(response), books)
     }
 
-    /** Books from a `getRankList` scroll-API JSON response. */
-    private fun rankApiBooks(json: String): List<Novel> {
+    /** Books from a Webnovel JSON list API (getRankList / get-search-list). */
+    private fun apiBooks(json: String): List<Novel> {
         val root = runCatching { JSONObject(json) }.getOrNull() ?: return emptyList()
         val items = findBookArray(root) ?: return emptyList()
         val out = mutableListOf<Novel>()
@@ -226,8 +253,13 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     override suspend fun latestUpdatesParse(response: Response): List<Novel> =
         parseSearchListing(response, latestSeen)
 
-    override suspend fun searchNovelsParse(response: Response): List<Novel> =
-        parseSearchListing(response, searchSeen)
+    override suspend fun searchNovelsParse(response: Response): List<Novel> {
+        // The advanced tag search returns JSON; keyword search returns a page.
+        if (response.request.url.toString().contains("get-search-list")) {
+            return paginate(searchSeen, requestedPage(response), apiBooks(response.bodyText()))
+        }
+        return parseSearchListing(response, searchSeen)
+    }
 
     private fun parseSearchListing(response: Response, seen: MutableSet<String>): List<Novel> {
         val html = response.bodyText()
@@ -236,7 +268,126 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         return paginate(seen, requestedPage(response), books)
     }
 
-    override fun getFilterList(): List<Filter<*>> = emptyList()
+    // --- Filters -------------------------------------------------------------
+
+    override val hasDynamicFilters: Boolean = true
+
+    override fun getFilterList(): List<Filter<*>> = buildList {
+        add(
+            ParamFilter(
+                "Content type", "categoryType",
+                arrayOf("Web Novel", "Fanfic"), intArrayOf(1, 4),
+            ),
+        )
+        add(
+            ParamFilter(
+                "Sort by", "orderBy",
+                arrayOf("Popular", "Collection", "Updated"), intArrayOf(1, 2, 3),
+            ),
+        )
+        add(
+            ParamFilter(
+                "Status", "bookStatus",
+                arrayOf("Any", "Ongoing", "Completed"), intArrayOf(0, 1, 2),
+            ),
+        )
+        add(
+            ParamFilter(
+                "Chapters", "chapterNum",
+                arrayOf("Any", "Fewer than 300", "300 - 1000", "More than 1000"),
+                intArrayOf(OMIT, 1, 2, 3),
+            ),
+        )
+        add(
+            ParamFilter(
+                "Updated", "newChapterTime",
+                arrayOf("Any", "Within 3 days", "Within 7 days", "Within 30 days"),
+                intArrayOf(0, 3, 7, 30),
+            ),
+        )
+        for ((group, tags) in tagGroups) {
+            add(Filter.Header(group))
+            for ((tagName, _) in tags) add(Filter.TriState(tagName))
+        }
+    }
+
+    override suspend fun fetchFilterOptions(): List<Filter<*>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = client.newCall(apiRequest("$TAG_LIST_API?categoryType=1&sex=1"))
+                .execute().use { it.bodyText() }
+            val groups = mutableListOf<Pair<String, List<Pair<String, String>>>>()
+            collectTagGroups(JSONObject(body), groups)
+            if (groups.isNotEmpty()) {
+                tagGroups = groups
+                tagNameToId = groups.flatMap { it.second }.toMap()
+            }
+        }
+        getFilterList()
+    }
+
+    /** Recursively collects `(groupName, [(tagName, tagId)])` from a tag-list response. */
+    private fun collectTagGroups(
+        node: Any?,
+        out: MutableList<Pair<String, List<Pair<String, String>>>>,
+    ) {
+        when (node) {
+            is JSONObject -> {
+                for (key in node.keys()) {
+                    val array = node.optJSONArray(key) ?: continue
+                    if (array.optJSONObject(0)?.has("tagId") != true) continue
+                    val tags = (0 until array.length()).mapNotNull { i ->
+                        val tag = array.optJSONObject(i) ?: return@mapNotNull null
+                        val id = tag.optString("tagId").ifEmpty { tag.optString("id") }
+                        val name = tag.optString("tagName").ifEmpty { tag.optString("name") }
+                        if (id.isEmpty() || name.isEmpty()) null else name.trim() to id
+                    }
+                    if (tags.isNotEmpty()) {
+                        val name = sequenceOf("categoryName", "groupName", "name", "title")
+                            .map { node.optString(it).trim() }
+                            .firstOrNull { it.isNotEmpty() } ?: key
+                        out += name to tags
+                    }
+                }
+                for (key in node.keys()) collectTagGroups(node.opt(key), out)
+            }
+            is JSONArray -> for (i in 0 until node.length()) collectTagGroups(node.opt(i), out)
+        }
+    }
+
+    private fun filterActive(filter: Filter<*>): Boolean = when (filter) {
+        is ParamFilter -> filter.state != 0
+        is Filter.TriState -> filter.state != Filter.TriState.STATE_IGNORE
+        else -> false
+    }
+
+    /** Builds a JSON-API request with the headers Webnovel's XHR endpoints expect. */
+    private fun apiRequest(url: String): Request {
+        val csrf = runCatching {
+            cookieValue(
+                CookieManager.getInstance().getCookie("https://m.webnovel.com").orEmpty(),
+                "_csrfToken",
+            )
+        }.getOrNull()
+        val full = if (csrf.isNullOrBlank()) {
+            url
+        } else {
+            "$url${if ('?' in url) '&' else '?'}_csrfToken=$csrf"
+        }
+        return Request.Builder()
+            .url(full)
+            .header("Referer", "https://m.webnovel.com/search/advancedResult")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Accept", "application/json")
+            .build()
+    }
+
+    /** A single-choice filter backed by an integer query parameter. */
+    private class ParamFilter(
+        name: String,
+        val param: String,
+        labels: Array<String>,
+        val codes: IntArray,
+    ) : Filter.Select<String>(name, labels)
 
     /** Book-card extraction from a server-rendered listing page. */
     private fun parseBookList(doc: Document): List<Novel> {
@@ -559,7 +710,14 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             "https://m.webnovel.com/ranking/novel/bi_annual/power_rank"
         private const val RANKING_API =
             "https://m.webnovel.com/go/pcm/category/getRankList"
+        private const val SEARCH_API =
+            "https://m.webnovel.com/go/pcm/search/get-search-list"
+        private const val TAG_LIST_API =
+            "https://m.webnovel.com/go/pcm/search/get-tag-list"
         private const val LATEST_URL = "https://m.webnovel.com/search?keywords=latest"
+
+        // ParamFilter code meaning "leave this query parameter out entirely".
+        private const val OMIT = -1
 
         // Sign-out clears cookies on every host scope Webnovel may set them on.
         private val COOKIE_DOMAINS = listOf(
