@@ -41,7 +41,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 17,
+    versionCode = 18,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -344,7 +344,8 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             is JSONObject -> {
                 for (key in node.keys()) {
                     val array = node.optJSONArray(key) ?: continue
-                    if (array.optJSONObject(0)?.has("tagId") != true) continue
+                    // Tag objects carry `tagName`; group objects carry `name`.
+                    if (array.optJSONObject(0)?.has("tagName") != true) continue
                     val tags = (0 until array.length()).mapNotNull { i ->
                         val tag = array.optJSONObject(i) ?: return@mapNotNull null
                         val id = tag.optString("tagId").ifEmpty { tag.optString("id") }
@@ -364,11 +365,11 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         }
     }
 
-    private fun filterActive(filter: Filter<*>): Boolean = when (filter) {
-        is ParamFilter -> filter.state != 0
-        is Filter.TriState -> filter.state != Filter.TriState.STATE_IGNORE
-        else -> false
-    }
+    // The advanced search returns nothing without a tag, so only a tag
+    // selection switches search out of plain keyword mode. The other filters
+    // refine a tag search but cannot drive one on their own.
+    private fun filterActive(filter: Filter<*>): Boolean =
+        filter is Filter.TriState && filter.state != Filter.TriState.STATE_IGNORE
 
     /** Builds a JSON-API request with the headers Webnovel's XHR endpoints expect. */
     private fun apiRequest(url: String): Request {
