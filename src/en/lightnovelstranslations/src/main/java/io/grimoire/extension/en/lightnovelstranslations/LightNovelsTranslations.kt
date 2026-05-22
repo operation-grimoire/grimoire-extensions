@@ -17,7 +17,7 @@ import java.net.URLEncoder
     name = "Light Novels Translations",
     lang = "en",
     baseUrl = "https://lightnovelstranslations.com",
-    versionCode = 1,
+    versionCode = 3,
 )
 class LightNovelsTranslations : ParsedHttpSource() {
 
@@ -99,6 +99,8 @@ class LightNovelsTranslations : ParsedHttpSource() {
             url = link.attr("href"),
             name = link.text().trim(),
             uploadDate = 0L,
+            // VIP chapters carry a `lock` class on the <li>; free ones `unlock`.
+            locked = element.hasClass("lock"),
         )
     }
 
