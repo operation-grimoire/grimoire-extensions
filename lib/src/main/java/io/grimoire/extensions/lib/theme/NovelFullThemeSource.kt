@@ -86,10 +86,21 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
 
     override fun pageListSelector() = "#chapter-content p"
 
-    override fun pageFromElement(element: Element, index: Int) = NovelPage(
-        index = index,
-        text = element.text(),
-    )
+    // Light-novel titles embed illustrations as <p><img> in #chapter-content;
+    // emit them as image pages instead of dropping them via .text(). Plain web
+    // novels have no images, so this is a no-op for them.
+    override fun pageFromElement(element: Element, index: Int): NovelPage {
+        val imageUrl = element.selectFirst("img")?.imageUrl()
+        if (imageUrl != null) {
+            return NovelPage(index = index, text = "", imageUrl = imageUrl)
+        }
+        return NovelPage(index = index, text = element.text())
+    }
+
+    private fun Element.imageUrl(): String? =
+        sequenceOf("data-src", "data-lazy-src", "src")
+            .map { absUrl(it) }
+            .firstOrNull { it.isNotBlank() }
 
     override suspend fun getChapterList(novel: Novel, page: Int): List<Chapter> =
         withContext(Dispatchers.IO) {
