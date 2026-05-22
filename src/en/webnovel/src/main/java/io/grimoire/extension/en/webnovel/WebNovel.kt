@@ -41,7 +41,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 21,
+    versionCode = 22,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -62,12 +62,14 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     private var rankApiQuery: String? = null
 
     // Advanced-search tag taxonomy, fetched once per session by
-    // fetchFilterOptions() and cached for the rest of the session.
+    // fetchFilterOptions() and cached for the rest of the session. The tag map
+    // also records each tag's section id (sex=1 or sex=2) so the search can
+    // target the section it belongs to.
     @Volatile
     private var tagGroups: List<Pair<String, List<Pair<String, String>>>> = emptyList()
 
     @Volatile
-    private var tagNameToId: Map<String, String> = emptyMap()
+    private var tagNameToId: Map<String, Pair<String, Int>> = emptyMap()
 
     private val tagMutex = Mutex()
 
@@ -142,16 +144,28 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         }
         val include = mutableListOf<String>()
         val exclude = mutableListOf<String>()
-        val params = StringBuilder("sex=1")
+        val extras = StringBuilder()
+        // Webnovel's advanced search is scoped to one section (sex=1 male,
+        // sex=2 female); derive it from the selected tags so a Romance pick
+        // searches the female section. Default to sex=1 when only excludes or
+        // non-tag filters are set.
+        var section: Int? = null
         for (filter in filters) when (filter) {
             is ParamFilter -> filter.codes[filter.state].takeIf { it != OMIT }
-                ?.let { params.append('&').append(filter.param).append('=').append(it) }
-            is Filter.Group<*> -> for (tag in triStatesOf(filter)) when (tag.state) {
-                Filter.TriState.STATE_INCLUDE -> tagNameToId[tag.name]?.let { include += it }
-                Filter.TriState.STATE_EXCLUDE -> tagNameToId[tag.name]?.let { exclude += it }
+                ?.let { extras.append('&').append(filter.param).append('=').append(it) }
+            is Filter.Group<*> -> for (tag in triStatesOf(filter)) {
+                val info = tagNameToId[tag.name] ?: continue
+                when (tag.state) {
+                    Filter.TriState.STATE_INCLUDE -> {
+                        include += info.first
+                        if (section == null) section = info.second
+                    }
+                    Filter.TriState.STATE_EXCLUDE -> exclude += info.first
+                }
             }
             else -> Unit
         }
+        val params = StringBuilder("sex=").append(section ?: 1).append(extras)
         if (include.isNotEmpty()) params.append("&tagId=").append(include.joinToString(","))
         if (exclude.isNotEmpty()) params.append("&negTagId=").append(exclude.joinToString(","))
         params.append("&pageIndex=").append(page)
@@ -344,14 +358,33 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     override suspend fun fetchFilterOptions(): List<Filter<*>> = withContext(Dispatchers.IO) {
         if (tagGroups.isEmpty()) {
             tagMutex.withLock {
-                if (tagGroups.isEmpty()) runCatching {
-                    val body = client.newCall(apiRequest("$TAG_LIST_API?categoryType=1&sex=1"))
-                        .execute().use { it.bodyText() }
-                    val groups = mutableListOf<Pair<String, List<Pair<String, String>>>>()
-                    collectTagGroups(JSONObject(body), groups)
-                    if (groups.isNotEmpty()) {
-                        tagGroups = groups
-                        tagNameToId = groups.flatMap { it.second }.toMap()
+                if (tagGroups.isEmpty()) {
+                    // Webnovel splits its tag taxonomy across the male (sex=1)
+                    // and female (sex=2) sections; each call returns only half
+                    // the tags, so fetch both and merge.
+                    val merged = LinkedHashMap<String, LinkedHashMap<String, Pair<String, Int>>>()
+                    for (section in intArrayOf(1, 2)) runCatching {
+                        val body = client.newCall(
+                            apiRequest("$TAG_LIST_API?categoryType=1&sex=$section"),
+                        ).execute().use { it.bodyText() }
+                        val groups = mutableListOf<Pair<String, List<Pair<String, String>>>>()
+                        collectTagGroups(JSONObject(body), groups)
+                        for ((groupName, tags) in groups) {
+                            val into = merged.getOrPut(groupName) { LinkedHashMap() }
+                            for ((tagName, tagId) in tags) {
+                                into.putIfAbsent(tagName, tagId to section)
+                            }
+                        }
+                    }
+                    if (merged.isNotEmpty()) {
+                        tagGroups = merged.map { (name, tags) ->
+                            name to tags.entries
+                                .sortedBy { it.key.lowercase() }
+                                .map { it.key to it.value.first }
+                        }
+                        tagNameToId = merged.values
+                            .flatMap { it.entries }
+                            .associate { it.key to it.value }
                     }
                 }
             }
