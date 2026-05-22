@@ -1,6 +1,6 @@
 [versions]
 agp = "9.2.1"
-extensionsApi = "0.1.0-SNAPSHOT"
+extensionsApi = "0.2.0"
 
 [libraries]
 grimoire-extensions-api = { group = "io.grimoire", name = "extensions-api", version.ref = "extensionsApi" }
