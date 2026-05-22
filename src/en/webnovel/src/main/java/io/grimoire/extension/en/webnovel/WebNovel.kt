@@ -41,7 +41,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 20,
+    versionCode = 21,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -548,9 +548,14 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     }
 
     override suspend fun chapterListParse(response: Response): List<Chapter> {
-        val doc = response.asJsoup()
-        val bookId = bookId(response.request.url.toString())
+        val html = response.bodyText()
+        val url = response.request.url.toString()
+        val doc = Jsoup.parse(html, url)
+        val bookId = bookId(url)
             ?: throw IOException("Webnovel: could not determine the book id")
+        // Publish times are not in the rendered rows; they live in the page's
+        // __NEXT_DATA__, keyed by chapter id.
+        val publishTimes = chapterPublishTimes(html)
         // A real chapter link is /book/<bookId>/<chapterId>. Restricting to this
         // book's id keeps "recommended" / sidebar book links out of the list.
         return doc.select("a[href*=/book/$bookId/]").mapNotNull { anchor ->
@@ -566,6 +571,7 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             Chapter(
                 url = href,
                 name = name,
+                uploadDate = publishTimes[chapterSegment] ?: 0L,
                 // VIP/locked rows carry a lock <svg>; free rows have none.
                 locked = anchor.selectFirst("svg") != null,
             )
@@ -575,6 +581,20 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             // position. Webnovel titles are arbitrary, so they cannot be parsed
             // for a chapter number.
             .mapIndexed { i, ch -> ch.copy(chapterNumber = (i + 1).toFloat()) }
+    }
+
+    /** Chapter publish times (epoch millis) keyed by chapter id, from the
+     *  catalog page's __NEXT_DATA__ `entities.chapter` map. */
+    private fun chapterPublishTimes(html: String): Map<String, Long> {
+        val chapters = runCatching {
+            nextDataState(html).getJSONObject("entities").getJSONObject("chapter")
+        }.getOrNull() ?: return emptyMap()
+        val out = HashMap<String, Long>()
+        for (id in chapters.keys()) {
+            val time = chapters.optJSONObject(id)?.optLong("publishTime") ?: 0L
+            if (time > 0L) out[id] = time
+        }
+        return out
     }
 
     // --- Chapter content -----------------------------------------------------
