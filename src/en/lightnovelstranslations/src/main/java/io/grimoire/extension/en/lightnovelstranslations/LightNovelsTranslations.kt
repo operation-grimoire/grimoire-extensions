@@ -17,7 +17,7 @@ import java.net.URLEncoder
     name = "Light Novels Translations",
     lang = "en",
     baseUrl = "https://lightnovelstranslations.com",
-    versionCode = 3,
+    versionCode = 4,
 )
 class LightNovelsTranslations : ParsedHttpSource() {
 
@@ -104,12 +104,25 @@ class LightNovelsTranslations : ParsedHttpSource() {
         )
     }
 
+    // Story content is a flat list of <p> tags inside .text_story; illustrations are
+    // <p>-wrapped <img> tags interleaved with the prose. The trailing AdSense block is a
+    // sibling <div class="row ... ads-section"> with no <p>, so it never matches here.
     override fun pageListSelector() = "div.text_story p"
 
-    override fun pageFromElement(element: Element, index: Int) = NovelPage(
-        index = index,
-        text = element.text(),
-    )
+    override fun pageFromElement(element: Element, index: Int): NovelPage {
+        val imageUrl = element.selectFirst("img")?.imageUrl()
+        if (imageUrl != null) {
+            return NovelPage(index = index, text = "", imageUrl = imageUrl)
+        }
+        return NovelPage(index = index, text = element.text())
+    }
+
+    // WordPress lazy-loading parks the real URL in data-src/data-lazy-src and leaves a
+    // placeholder in src, so prefer those before falling back to src.
+    private fun Element.imageUrl(): String? =
+        sequenceOf("data-src", "data-lazy-src", "src")
+            .map { absUrl(it) }
+            .firstOrNull { it.isNotBlank() }
 
     override fun getFilterList() = emptyList<Filter<*>>()
 
