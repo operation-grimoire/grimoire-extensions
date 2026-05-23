@@ -9,13 +9,18 @@ import io.grimoire.extensions.lib.theme.WPNovelsSource
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.time.LocalDate
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
+import java.util.Locale
 
 @SourceInfo(
     id = 5L,
     name = "Foxaholic",
     lang = "en",
     baseUrl = "https://www.foxaholic.com",
-    versionCode = 4,
+    versionCode = 5,
 )
 class Foxaholic : WPNovelsSource() {
     override val id = 5L
@@ -54,15 +59,47 @@ class Foxaholic : WPNovelsSource() {
         selectFirst("div.post-content_item:has(div.summary-heading h5:contains($heading)) div.summary-content")
             ?.text()?.trim()
 
-    // Paid chapters carry the `premium-block` class and a `href="#"` placeholder;
-    // mark them locked so the host shows them as inaccessible without trying to
-    // fetch the dummy URL.
-    override fun chapterFromElement(element: Element) = Chapter(
-        url = element.selectFirst("a")!!.attr("href"),
-        name = element.selectFirst("a")!!.text().trim(),
-        uploadDate = 0L,
-        locked = element.hasClass("premium-block"),
-    )
+    // Paid chapters carry the `premium-block` class and a `href="#"` placeholder.
+    // Mark them locked so the host won't attempt to fetch them, and replace the
+    // shared `#` URL with the per-chapter `data-chapter-XXXX` sidecar class —
+    // the chapter list is keyed by URL in the app, and 25+ locked entries
+    // sharing the same `#` crashes Compose's LazyColumn on scroll.
+    override fun chapterFromElement(element: Element): Chapter {
+        val isLocked = element.hasClass("premium-block")
+        val anchor = element.selectFirst("a")!!
+        val url = if (isLocked) {
+            val chapterId = element.classNames()
+                .firstOrNull { it.startsWith("data-chapter-") }
+                ?.removePrefix("data-chapter-")
+            if (chapterId != null) "#locked-$chapterId" else anchor.attr("href")
+        } else {
+            anchor.attr("href")
+        }
+        return Chapter(
+            url = url,
+            name = anchor.text().trim(),
+            uploadDate = parseReleaseDate(element),
+            locked = isLocked,
+        )
+    }
+
+    // Chapter dates are rendered as e.g. "September 3, 2024" inside the
+    // `chapter-release-date` sidecar — both free and locked rows carry one.
+    // Parse as a UTC LocalDate; fall back to 0 (the model's "unknown" sentinel)
+    // when the field is missing or formatted unexpectedly so the chapter still
+    // appears in the list.
+    private fun parseReleaseDate(element: Element): Long {
+        val raw = element.selectFirst("span.chapter-release-date")?.text()?.trim()
+            ?: return 0L
+        return runCatching {
+            LocalDate.parse(raw, RELEASE_DATE_FORMATTER)
+                .atStartOfDay(ZoneOffset.UTC)
+                .toInstant()
+                .toEpochMilli()
+        }.getOrElse {
+            if (it is DateTimeParseException) 0L else throw it
+        }
+    }
 
     // Chapter content mixes prose <p> with illustrations the WordPress editor
     // wraps as <p><img> or <figure><img>; walk both in document order. An image
@@ -88,4 +125,10 @@ class Foxaholic : WPNovelsSource() {
         sequenceOf("data-src", "data-lazy-src", "src")
             .map { absUrl(it) }
             .firstOrNull { it.contains("/wp-content/uploads/", ignoreCase = true) }
+
+    private companion object {
+        // ENGLISH locale required so month names parse regardless of device locale.
+        val RELEASE_DATE_FORMATTER: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.ENGLISH)
+    }
 }
