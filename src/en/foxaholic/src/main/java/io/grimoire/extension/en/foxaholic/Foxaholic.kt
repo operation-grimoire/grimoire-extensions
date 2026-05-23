@@ -26,21 +26,27 @@ class Foxaholic : WPNovelsSource() {
     // Foxaholic's sidebar exposes two status fields under non-standard headings
     // ("Translation" — Active/Dropped/Finished/Teaser, and "Novel" — OnGoing/
     // Completed) instead of the Madara default "Status", so the base parser
-    // falls through to UNKNOWN. Translator-side terminal states override the
-    // work's own status from a reader's perspective: a dropped translation
-    // will not produce more chapters even if the novel is ongoing.
+    // falls through to UNKNOWN. Translation status reflects what is actually
+    // available to read on the host, so it takes priority: a Completed novel
+    // whose translation is still Active means more chapters are coming, and
+    // that is what a reader cares about. "Novel" is consulted only when the
+    // translation field is missing or unrecognized.
     override fun novelDetailsFromDocument(document: Document): Novel {
         val translation = document.statusContentFor("Translation")?.lowercase()
         val novel = document.statusContentFor("Novel")?.lowercase()
-        val status = when {
-            translation == "dropped" -> NovelStatus.CANCELLED
-            translation == "teaser" -> NovelStatus.HIATUS
+        val byTranslation = when (translation) {
+            "dropped" -> NovelStatus.CANCELLED
+            "teaser" -> NovelStatus.HIATUS
+            "finished" -> NovelStatus.COMPLETED
+            "active" -> NovelStatus.ONGOING
+            else -> null
+        }
+        val byNovel = when {
             novel?.contains("completed") == true -> NovelStatus.COMPLETED
             novel?.contains("ongoing") == true -> NovelStatus.ONGOING
-            translation == "finished" -> NovelStatus.COMPLETED
-            translation == "active" -> NovelStatus.ONGOING
-            else -> NovelStatus.UNKNOWN
+            else -> null
         }
+        val status = byTranslation ?: byNovel ?: NovelStatus.UNKNOWN
         return super.novelDetailsFromDocument(document).copy(status = status)
     }
 

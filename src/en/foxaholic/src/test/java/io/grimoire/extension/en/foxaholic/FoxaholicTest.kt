@@ -22,8 +22,8 @@ class FoxaholicTest {
     }
 
     @Test
-    fun `real page — novel Completed wins over translation Active`() {
-        assertEquals(NovelStatus.COMPLETED, source.novelDetailsFromDocument(realPage).status)
+    fun `real page — translation Active drives status even with Completed novel`() {
+        assertEquals(NovelStatus.ONGOING, source.novelDetailsFromDocument(realPage).status)
     }
 
     @Test
@@ -43,6 +43,12 @@ class FoxaholicTest {
     }
 
     @Test
+    fun `status — active translation overrides completed novel`() {
+        val doc = sidebar(translation = "Active", novel = "Completed")
+        assertEquals(NovelStatus.ONGOING, source.novelDetailsFromDocument(doc).status)
+    }
+
+    @Test
     fun `status — dropped translation overrides ongoing novel`() {
         val doc = sidebar(translation = "Dropped", novel = "OnGoing")
         assertEquals(NovelStatus.CANCELLED, source.novelDetailsFromDocument(doc).status)
@@ -55,15 +61,21 @@ class FoxaholicTest {
     }
 
     @Test
-    fun `status — active translation with ongoing novel is ongoing`() {
-        val doc = sidebar(translation = "Active", novel = "OnGoing")
-        assertEquals(NovelStatus.ONGOING, source.novelDetailsFromDocument(doc).status)
+    fun `status — finished translation maps to completed`() {
+        val doc = sidebar(translation = "Finished", novel = "Completed")
+        assertEquals(NovelStatus.COMPLETED, source.novelDetailsFromDocument(doc).status)
     }
 
     @Test
-    fun `status — finished translation falls back to completed when novel field is missing`() {
-        val doc = sidebar(translation = "Finished", novel = null)
+    fun `status — falls back to novel field when translation is absent`() {
+        val doc = sidebar(translation = null, novel = "Completed")
         assertEquals(NovelStatus.COMPLETED, source.novelDetailsFromDocument(doc).status)
+    }
+
+    @Test
+    fun `status — falls back to novel field for unrecognized translation value`() {
+        val doc = sidebar(translation = "Pending", novel = "OnGoing")
+        assertEquals(NovelStatus.ONGOING, source.novelDetailsFromDocument(doc).status)
     }
 
     @Test
