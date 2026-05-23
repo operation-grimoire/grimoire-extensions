@@ -3,10 +3,10 @@ package io.grimoire.extension.en.foxaholic
 import io.grimoire.api.model.NovelStatus
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
 
 class FoxaholicTest {
 
@@ -35,10 +35,10 @@ class FoxaholicTest {
         assertEquals(128, chapters.size)
         assertEquals(25, locked.size)
         assertEquals(103, unlocked.size)
-        assertTrue("locked chapters should use the placeholder href", locked.all { it.url == "#" })
+        assertTrue(locked.all { it.url == "#" }, "locked chapters should use the placeholder href")
         assertTrue(
-            "free chapters should have a real URL",
             unlocked.all { it.url.startsWith("https://www.foxaholic.com/") },
+            "free chapters should have a real URL",
         )
     }
 

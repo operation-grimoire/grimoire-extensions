@@ -37,5 +37,9 @@ android {
 
 dependencies {
     implementation(project(":lib"))
-    testImplementation(libs.junit)
+    testImplementation(libs.junit.jupiter)
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
 }
