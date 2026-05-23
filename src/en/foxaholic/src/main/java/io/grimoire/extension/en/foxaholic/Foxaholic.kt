@@ -9,6 +9,11 @@ import io.grimoire.extensions.lib.theme.WPNovelsSource
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.time.LocalDate
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
+import java.util.Locale
 
 @SourceInfo(
     id = 5L,
@@ -73,9 +78,27 @@ class Foxaholic : WPNovelsSource() {
         return Chapter(
             url = url,
             name = anchor.text().trim(),
-            uploadDate = 0L,
+            uploadDate = parseReleaseDate(element),
             locked = isLocked,
         )
+    }
+
+    // Chapter dates are rendered as e.g. "September 3, 2024" inside the
+    // `chapter-release-date` sidecar — both free and locked rows carry one.
+    // Parse as a UTC LocalDate; fall back to 0 (the model's "unknown" sentinel)
+    // when the field is missing or formatted unexpectedly so the chapter still
+    // appears in the list.
+    private fun parseReleaseDate(element: Element): Long {
+        val raw = element.selectFirst("span.chapter-release-date")?.text()?.trim()
+            ?: return 0L
+        return runCatching {
+            LocalDate.parse(raw, RELEASE_DATE_FORMATTER)
+                .atStartOfDay(ZoneOffset.UTC)
+                .toInstant()
+                .toEpochMilli()
+        }.getOrElse {
+            if (it is DateTimeParseException) 0L else throw it
+        }
     }
 
     // Chapter content mixes prose <p> with illustrations the WordPress editor
@@ -102,4 +125,10 @@ class Foxaholic : WPNovelsSource() {
         sequenceOf("data-src", "data-lazy-src", "src")
             .map { absUrl(it) }
             .firstOrNull { it.contains("/wp-content/uploads/", ignoreCase = true) }
+
+    private companion object {
+        // ENGLISH locale required so month names parse regardless of device locale.
+        val RELEASE_DATE_FORMATTER: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.ENGLISH)
+    }
 }
