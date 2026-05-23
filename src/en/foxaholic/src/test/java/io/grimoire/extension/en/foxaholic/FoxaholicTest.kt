@@ -35,11 +35,19 @@ class FoxaholicTest {
         assertEquals(128, chapters.size)
         assertEquals(25, locked.size)
         assertEquals(103, unlocked.size)
-        assertTrue(locked.all { it.url == "#" }, "locked chapters should use the placeholder href")
+        assertTrue(
+            locked.all { it.url.startsWith("#locked-") },
+            "locked chapters should expose a synthetic per-chapter URL",
+        )
         assertTrue(
             unlocked.all { it.url.startsWith("https://www.foxaholic.com/") },
             "free chapters should have a real URL",
         )
+        // The whole list must contain unique URLs — Compose's chapter LazyColumn
+        // keys by URL, so duplicate keys (the original `#` href on every locked
+        // entry) crash the screen on scroll. This is the regression we're guarding.
+        val urls = chapters.map { it.url }
+        assertEquals(urls.size, urls.toSet().size, "every chapter URL should be unique")
     }
 
     @Test
@@ -102,7 +110,7 @@ class FoxaholicTest {
     }
 
     @Test
-    fun `chapter — premium-block element is locked with placeholder href`() {
+    fun `chapter — premium-block element is locked with per-chapter synthetic URL`() {
         val li = parseChapterLi(
             """
             <li class="wp-manga-chapter premium coin-5 data-chapter-63868 premium-block ">
@@ -113,8 +121,22 @@ class FoxaholicTest {
             """.trimIndent(),
         )
         val chapter = source.chapterFromElement(li)
-        assertEquals("#", chapter.url)
+        assertEquals("#locked-63868", chapter.url)
         assertEquals("Chapter 94 - After We Get Married", chapter.name)
+        assertTrue(chapter.locked)
+    }
+
+    @Test
+    fun `chapter — locked entry without a data-chapter class falls back to the raw href`() {
+        val li = parseChapterLi(
+            """
+            <li class="wp-manga-chapter premium premium-block">
+              <a href="#"> Chapter X </a>
+            </li>
+            """.trimIndent(),
+        )
+        val chapter = source.chapterFromElement(li)
+        assertEquals("#", chapter.url)
         assertTrue(chapter.locked)
     }
 

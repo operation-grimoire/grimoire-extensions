@@ -54,15 +54,29 @@ class Foxaholic : WPNovelsSource() {
         selectFirst("div.post-content_item:has(div.summary-heading h5:contains($heading)) div.summary-content")
             ?.text()?.trim()
 
-    // Paid chapters carry the `premium-block` class and a `href="#"` placeholder;
-    // mark them locked so the host shows them as inaccessible without trying to
-    // fetch the dummy URL.
-    override fun chapterFromElement(element: Element) = Chapter(
-        url = element.selectFirst("a")!!.attr("href"),
-        name = element.selectFirst("a")!!.text().trim(),
-        uploadDate = 0L,
-        locked = element.hasClass("premium-block"),
-    )
+    // Paid chapters carry the `premium-block` class and a `href="#"` placeholder.
+    // Mark them locked so the host won't attempt to fetch them, and replace the
+    // shared `#` URL with the per-chapter `data-chapter-XXXX` sidecar class —
+    // the chapter list is keyed by URL in the app, and 25+ locked entries
+    // sharing the same `#` crashes Compose's LazyColumn on scroll.
+    override fun chapterFromElement(element: Element): Chapter {
+        val isLocked = element.hasClass("premium-block")
+        val anchor = element.selectFirst("a")!!
+        val url = if (isLocked) {
+            val chapterId = element.classNames()
+                .firstOrNull { it.startsWith("data-chapter-") }
+                ?.removePrefix("data-chapter-")
+            if (chapterId != null) "#locked-$chapterId" else anchor.attr("href")
+        } else {
+            anchor.attr("href")
+        }
+        return Chapter(
+            url = url,
+            name = anchor.text().trim(),
+            uploadDate = 0L,
+            locked = isLocked,
+        )
+    }
 
     // Chapter content mixes prose <p> with illustrations the WordPress editor
     // wraps as <p><img> or <figure><img>; walk both in document order. An image
