@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.time.LocalDate
+import java.time.ZoneOffset
 
 class FoxaholicTest {
 
@@ -48,6 +50,12 @@ class FoxaholicTest {
         // entry) crash the screen on scroll. This is the regression we're guarding.
         val urls = chapters.map { it.url }
         assertEquals(urls.size, urls.toSet().size, "every chapter URL should be unique")
+        // Both free and locked rows carry a span.chapter-release-date in the
+        // captured page, so every chapter should have a non-zero upload date.
+        assertTrue(
+            chapters.all { it.uploadDate > 0L },
+            "every chapter should have a parsed upload date",
+        )
     }
 
     @Test
@@ -106,6 +114,7 @@ class FoxaholicTest {
         val chapter = source.chapterFromElement(li)
         assertEquals("https://www.foxaholic.com/novel/x/chapter-1/", chapter.url)
         assertEquals("Chapter 1 - Intro", chapter.name)
+        assertEquals(epochMillisUtc(2024, 9, 3), chapter.uploadDate)
         assertFalse(chapter.locked)
     }
 
@@ -123,7 +132,33 @@ class FoxaholicTest {
         val chapter = source.chapterFromElement(li)
         assertEquals("#locked-63868", chapter.url)
         assertEquals("Chapter 94 - After We Get Married", chapter.name)
+        assertEquals(epochMillisUtc(2024, 9, 27), chapter.uploadDate)
         assertTrue(chapter.locked)
+    }
+
+    @Test
+    fun `chapter — missing chapter-release-date returns 0L`() {
+        val li = parseChapterLi(
+            """
+            <li class="wp-manga-chapter free-chap">
+              <a href="https://www.foxaholic.com/novel/x/chapter-2/"> Chapter 2 </a>
+            </li>
+            """.trimIndent(),
+        )
+        assertEquals(0L, source.chapterFromElement(li).uploadDate)
+    }
+
+    @Test
+    fun `chapter — unparseable date returns 0L without throwing`() {
+        val li = parseChapterLi(
+            """
+            <li class="wp-manga-chapter free-chap">
+              <a href="https://www.foxaholic.com/novel/x/chapter-3/"> Chapter 3 </a>
+              <span class="chapter-release-date"><i>3 days ago</i></span>
+            </li>
+            """.trimIndent(),
+        )
+        assertEquals(0L, source.chapterFromElement(li).uploadDate)
     }
 
     @Test
@@ -142,6 +177,9 @@ class FoxaholicTest {
 
     private fun parseChapterLi(html: String) =
         Jsoup.parseBodyFragment(html).selectFirst("li.wp-manga-chapter")!!
+
+    private fun epochMillisUtc(year: Int, month: Int, day: Int): Long =
+        LocalDate.of(year, month, day).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
 
     private fun sidebar(translation: String?, novel: String?): Document {
         fun row(heading: String, value: String?) = value?.let {
