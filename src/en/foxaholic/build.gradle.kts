@@ -38,6 +38,9 @@ android {
 dependencies {
     implementation(project(":lib"))
     testImplementation(libs.junit.jupiter)
+    // Gradle 9 no longer auto-resolves the JUnit Platform Launcher from
+    // ServiceLoader — without this dep tests are silently discovered as zero.
+    testRuntimeOnly(libs.junit.platform.launcher)
 }
 
 tasks.withType<Test>().configureEach {
