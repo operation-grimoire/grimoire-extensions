@@ -80,7 +80,7 @@ jobs:
             targets="$targets $m:assembleRelease"
           done
           echo "Building:$targets"
-          ./gradlew $targets
+          ./gradlew $targets --build-cache
 
       - name: Sign APKs
         env:
