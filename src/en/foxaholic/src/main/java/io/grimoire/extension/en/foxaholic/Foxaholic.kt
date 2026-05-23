@@ -1,9 +1,13 @@
 package io.grimoire.extension.en.foxaholic
 
+import io.grimoire.api.model.Chapter
+import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
+import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.extensions.lib.theme.WPNovelsSource
 import okhttp3.Response
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 @SourceInfo(
@@ -11,13 +15,50 @@ import org.jsoup.nodes.Element
     name = "Foxaholic",
     lang = "en",
     baseUrl = "https://www.foxaholic.com",
-    versionCode = 3,
+    versionCode = 4,
 )
 class Foxaholic : WPNovelsSource() {
     override val id = 5L
     override val name = "Foxaholic"
     override val lang = "en"
     override val baseUrl = "https://www.foxaholic.com"
+
+    // Foxaholic's sidebar exposes two status fields under non-standard headings
+    // ("Translation" — Active/Dropped/Finished/Teaser, and "Novel" — OnGoing/
+    // Completed) instead of the Madara default "Status", so the base parser
+    // falls through to UNKNOWN. Translator-side states override the work's
+    // own status from a reader's perspective: a dropped translation will not
+    // produce more chapters even if the novel is ongoing.
+    override fun novelDetailsFromDocument(document: Document): Novel =
+        super.novelDetailsFromDocument(document).copy(status = parseStatus(document))
+
+    private fun parseStatus(document: Document): NovelStatus {
+        val translation = document.statusContentFor("Translation")?.lowercase()
+        val novel = document.statusContentFor("Novel")?.lowercase()
+        return when {
+            translation == "dropped" -> NovelStatus.CANCELLED
+            translation == "teaser" -> NovelStatus.HIATUS
+            novel?.contains("completed") == true -> NovelStatus.COMPLETED
+            novel?.contains("ongoing") == true -> NovelStatus.ONGOING
+            translation == "finished" -> NovelStatus.COMPLETED
+            translation == "active" -> NovelStatus.ONGOING
+            else -> NovelStatus.UNKNOWN
+        }
+    }
+
+    private fun Document.statusContentFor(heading: String): String? =
+        selectFirst("div.post-content_item:has(div.summary-heading h5:contains($heading)) div.summary-content")
+            ?.text()?.trim()
+
+    // Paid chapters carry the `premium-block` class and a `href="#"` placeholder;
+    // mark them locked so the host shows them as inaccessible without trying to
+    // fetch the dummy URL.
+    override fun chapterFromElement(element: Element) = Chapter(
+        url = element.selectFirst("a")!!.attr("href"),
+        name = element.selectFirst("a")!!.text().trim(),
+        uploadDate = 0L,
+        locked = element.hasClass("premium-block"),
+    )
 
     // Chapter content mixes prose <p> with illustrations the WordPress editor
     // wraps as <p><img> or <figure><img>; walk both in document order. An image
