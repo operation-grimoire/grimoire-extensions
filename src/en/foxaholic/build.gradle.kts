@@ -24,8 +24,18 @@ android {
             isMinifyEnabled = false
         }
     }
+
+    // Unit tests construct the Foxaholic source directly, which transitively
+    // initializes the default OkHttp client (WebViewCookieJar →
+    // android.webkit.CookieManager). Returning default values for unmocked
+    // Android calls lets that initializer set its field to null rather than
+    // throw — the cookie jar isn't actually used by the parsing tests.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
     implementation(project(":lib"))
+    testImplementation(libs.junit)
 }

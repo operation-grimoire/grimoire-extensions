@@ -26,16 +26,13 @@ class Foxaholic : WPNovelsSource() {
     // Foxaholic's sidebar exposes two status fields under non-standard headings
     // ("Translation" — Active/Dropped/Finished/Teaser, and "Novel" — OnGoing/
     // Completed) instead of the Madara default "Status", so the base parser
-    // falls through to UNKNOWN. Translator-side states override the work's
-    // own status from a reader's perspective: a dropped translation will not
-    // produce more chapters even if the novel is ongoing.
-    override fun novelDetailsFromDocument(document: Document): Novel =
-        super.novelDetailsFromDocument(document).copy(status = parseStatus(document))
-
-    private fun parseStatus(document: Document): NovelStatus {
+    // falls through to UNKNOWN. Translator-side terminal states override the
+    // work's own status from a reader's perspective: a dropped translation
+    // will not produce more chapters even if the novel is ongoing.
+    override fun novelDetailsFromDocument(document: Document): Novel {
         val translation = document.statusContentFor("Translation")?.lowercase()
         val novel = document.statusContentFor("Novel")?.lowercase()
-        return when {
+        val status = when {
             translation == "dropped" -> NovelStatus.CANCELLED
             translation == "teaser" -> NovelStatus.HIATUS
             novel?.contains("completed") == true -> NovelStatus.COMPLETED
@@ -44,6 +41,7 @@ class Foxaholic : WPNovelsSource() {
             translation == "active" -> NovelStatus.ONGOING
             else -> NovelStatus.UNKNOWN
         }
+        return super.novelDetailsFromDocument(document).copy(status = status)
     }
 
     private fun Document.statusContentFor(heading: String): String? =

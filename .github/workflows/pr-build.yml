@@ -53,15 +53,17 @@ jobs:
         run: chmod +x gradlew
 
       # Compile-checks the changed extensions without signing or releasing —
-      # a release build still happens on push to main.
-      - name: Assemble debug APKs
+      # a release build still happens on push to main. Unit tests run on each
+      # changed module too, so extensions that ship tests (e.g. parser
+      # fixtures) catch regressions before they merge.
+      - name: Assemble debug APKs and run unit tests
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           targets=""
           for m in ${{ needs.detect.outputs.modules }}; do
-            targets="$targets $m:assembleDebug"
+            targets="$targets $m:assembleDebug $m:testDebugUnitTest"
           done
           echo "Building:$targets"
           ./gradlew $targets --build-cache --stacktrace
