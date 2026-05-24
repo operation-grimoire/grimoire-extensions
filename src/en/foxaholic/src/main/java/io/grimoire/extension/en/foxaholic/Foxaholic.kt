@@ -4,6 +4,7 @@ import io.grimoire.api.model.Chapter
 import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
+import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.extensions.lib.theme.WPNovelsSource
 import okhttp3.Response
@@ -20,7 +21,7 @@ import java.util.Locale
     name = "Foxaholic",
     lang = "en",
     baseUrl = "https://www.foxaholic.com",
-    versionCode = 5,
+    versionCode = 6,
 )
 class Foxaholic : WPNovelsSource() {
     override val id = 5L
@@ -113,7 +114,14 @@ class Foxaholic : WPNovelsSource() {
             if (imageUrl != null) {
                 NovelPage(index = index, text = "", imageUrl = imageUrl)
             } else {
-                element.text().trim().takeIf { it.isNotEmpty() }?.let { NovelPage(index, it) }
+                // `formattedText` preserves italics/bold/br/links that
+                // element.text() would flatten. Leave it null when there's
+                // no inline formatting so plain prose doesn't double its
+                // size in the offline download payload.
+                val text = element.text().trim()
+                if (text.isEmpty()) return@mapIndexedNotNull null
+                val formatted = element.richHtml().takeIf { it != text }
+                NovelPage(index = index, text = text, formattedText = formatted)
             }
         }
     }

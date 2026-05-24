@@ -5,6 +5,7 @@ import io.grimoire.api.model.Filter
 import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.network.ParsedHttpSource
+import io.grimoire.api.network.richHtml
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -107,10 +108,16 @@ abstract class WPNovelsSource : ParsedHttpSource() {
     // either ".reading-content" or a ".text-left" inner wrapper.
     override fun pageListSelector() = "div.reading-content p, div.reading-content div.text-left p"
 
-    override fun pageFromElement(element: Element, index: Int) = NovelPage(
-        index = index,
-        text = element.text(),
-    )
+    // `formattedText` preserves the WP-Novels markup the reader can render
+    // with AnnotatedString.fromHtml — italics, bold, links, in-paragraph
+    // <br> breaks. When richHtml() matches text() (a paragraph with no
+    // inline formatting at all), leave formattedText null so plain prose
+    // pages don't double their size in the offline download.
+    override fun pageFromElement(element: Element, index: Int): NovelPage {
+        val text = element.text()
+        val formatted = element.richHtml().takeIf { it != text }
+        return NovelPage(index = index, text = text, formattedText = formatted)
+    }
 
     // Default: no filters
     override fun getFilterList() = emptyList<Filter<*>>()

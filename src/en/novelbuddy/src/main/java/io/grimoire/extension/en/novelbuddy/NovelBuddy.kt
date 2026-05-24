@@ -6,6 +6,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
+import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.SourceInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -13,7 +14,7 @@ import okhttp3.Response
 import org.json.JSONObject
 import org.jsoup.Jsoup
 
-@SourceInfo(id = 2L, name = "NovelBuddy", lang = "en", baseUrl = "https://novelbuddy.com", versionCode = 5)
+@SourceInfo(id = 2L, name = "NovelBuddy", lang = "en", baseUrl = "https://novelbuddy.com", versionCode = 6)
 class NovelBuddy : HttpSource() {
 
     override val id = 2L
@@ -131,10 +132,15 @@ class NovelBuddy : HttpSource() {
             .optJSONObject("initialChapter")
             ?.optString("content")
             ?: return emptyList()
+        // `formattedText` preserves any inline markup in the chapter HTML
+        // (italics, bold, links). Left null when there's no formatting so
+        // plain prose paragraphs don't double their size on disk.
         return Jsoup.parse(contentHtml).select("p")
             .mapIndexedNotNull { index, el ->
                 val text = el.text().trim()
-                if (text.isEmpty()) null else NovelPage(index, text)
+                if (text.isEmpty()) return@mapIndexedNotNull null
+                val formatted = el.richHtml().takeIf { it != text }
+                NovelPage(index = index, text = text, formattedText = formatted)
             }
     }
 
