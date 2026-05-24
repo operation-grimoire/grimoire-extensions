@@ -6,6 +6,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.ParsedHttpSource
+import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.SourceInfo
 import okhttp3.Request
 import org.jsoup.nodes.Document
@@ -17,7 +18,7 @@ import java.net.URLEncoder
     name = "Light Novels Translations",
     lang = "en",
     baseUrl = "https://lightnovelstranslations.com",
-    versionCode = 4,
+    versionCode = 5,
 )
 class LightNovelsTranslations : ParsedHttpSource() {
 
@@ -104,17 +105,31 @@ class LightNovelsTranslations : ParsedHttpSource() {
         )
     }
 
-    // Story content is a flat list of <p> tags inside .text_story; illustrations are
-    // <p>-wrapped <img> tags interleaved with the prose. The trailing AdSense block is a
-    // sibling <div class="row ... ads-section"> with no <p>, so it never matches here.
-    override fun pageListSelector() = "div.text_story p"
+    // Story content is a flat list of <p> tags inside .text_story interleaved with
+    // <hr/> scene breaks; illustrations are <p>-wrapped <img> tags. The trailing
+    // AdSense block sits in a sibling <div class="row ... ads-section">, but using a
+    // direct-child selector keeps us defensive against future markup shifts.
+    override fun pageListSelector() = "div.text_story > p, div.text_story > hr"
 
     override fun pageFromElement(element: Element, index: Int): NovelPage {
+        if (element.tagName().equals("hr", ignoreCase = true)) {
+            return NovelPage(index = index, text = "", isSeparator = true)
+        }
         val imageUrl = element.selectFirst("img")?.imageUrl()
         if (imageUrl != null) {
             return NovelPage(index = index, text = "", imageUrl = imageUrl)
         }
-        return NovelPage(index = index, text = element.text())
+        // `text` stays the Jsoup-normalised plain string for TTS/search/etc.
+        // `formattedText` carries the constrained-HTML version the reader
+        // renders with `AnnotatedString.fromHtml` — preserving italics
+        // (`<em>` → `<i>`), bold (`<strong>` → `<b>`), in-paragraph line
+        // breaks (`<br/>`), and the site's stat-tree indentation
+        // (`<span style="margin-left: Npx">` → runs of `&nbsp;`).
+        return NovelPage(
+            index = index,
+            text = element.text(),
+            formattedText = element.richHtml(),
+        )
     }
 
     // WordPress lazy-loading parks the real URL in data-src/data-lazy-src and leaves a
