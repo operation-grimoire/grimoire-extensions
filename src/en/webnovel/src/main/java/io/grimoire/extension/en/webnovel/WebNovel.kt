@@ -7,6 +7,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
+import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.source.WebViewLoginSource
 import kotlinx.coroutines.Dispatchers
@@ -41,7 +42,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 22,
+    versionCode = 23,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -646,23 +647,36 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
         // Chapter text lives in __NEXT_DATA__ at entities.chapter[id].contents:
         // an array of paragraphs whose `content` is a small HTML fragment.
+        // We parse the fragment as a body, then keep both the plain text (for
+        // TTS/search) and a richHtml() version (for the reader's italics/bold/
+        // links rendering) — when they match, formattedText is left null so
+        // plain prose paragraphs don't double their size on disk.
         val contents = chapter?.optJSONArray("contents")
         if (contents != null && contents.length() > 0) {
             val pages = (0 until contents.length()).mapNotNull { i ->
                 val fragment = contents.optJSONObject(i)?.optString("content").orEmpty()
-                Jsoup.parse(fragment).text().trim().takeIf { it.isNotEmpty() }
+                val body = Jsoup.parseBodyFragment(fragment).body()
+                val text = body.text().trim()
+                if (text.isEmpty()) null else {
+                    val formatted = body.richHtml().takeIf { it != text }
+                    NovelPage(index = i, text = text, formattedText = formatted)
+                }
             }
-            if (pages.isNotEmpty()) {
-                return pages.mapIndexed { i, text -> NovelPage(i, text) }
-            }
+            if (pages.isNotEmpty()) return pages
         }
 
         // Fallback for any server-rendered layout.
         val scraped = Jsoup.parse(html, url)
             .select(".cha-words p, .cha-content p, .j_chapterWrapper p")
-            .map { it.text().trim() }.filter { it.isNotEmpty() }
+            .mapNotNull { el ->
+                val text = el.text().trim()
+                if (text.isEmpty()) null else el to text
+            }
         if (scraped.isNotEmpty()) {
-            return scraped.mapIndexed { i, text -> NovelPage(i, text) }
+            return scraped.mapIndexed { i, (el, text) ->
+                val formatted = el.richHtml().takeIf { it != text }
+                NovelPage(index = i, text = text, formattedText = formatted)
+            }
         }
 
         throw IOException(LOCKED_MESSAGE)

@@ -6,6 +6,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.ParsedHttpSource
+import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.PaginatedSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -88,13 +89,21 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
 
     // Light-novel titles embed illustrations as <p><img> in #chapter-content;
     // emit them as image pages instead of dropping them via .text(). Plain web
-    // novels have no images, so this is a no-op for them.
+    // novels have no images, so this branch is a no-op for them.
+    //
+    // `formattedText` carries the constrained-HTML version the reader renders
+    // with AnnotatedString.fromHtml (italics, bold, links, in-paragraph line
+    // breaks). When the paragraph has no formatting at all, richHtml() and
+    // text() produce the same string, so leave it null to avoid duplicating
+    // every paragraph in the offline download payload.
     override fun pageFromElement(element: Element, index: Int): NovelPage {
         val imageUrl = element.selectFirst("img")?.imageUrl()
         if (imageUrl != null) {
             return NovelPage(index = index, text = "", imageUrl = imageUrl)
         }
-        return NovelPage(index = index, text = element.text())
+        val text = element.text()
+        val formatted = element.richHtml().takeIf { it != text }
+        return NovelPage(index = index, text = text, formattedText = formatted)
     }
 
     private fun Element.imageUrl(): String? =
