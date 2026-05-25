@@ -1,0 +1,76 @@
+name: Publish lib/ to GitHub Packages
+
+# Publishes io.grimoire:extensions-lib. The contract mirrors
+# grimoire-extensions-api/publish.yml:
+#   - every push to main publishes <next>-SNAPSHOT for cross-repo dev
+#   - a pushed lib-vX.Y.Z tag (or workflow_dispatch with a tag) publishes the
+#     immutable X.Y.Z release.
+on:
+  push:
+    branches: [main]
+    tags: ['lib-v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release version to cut, e.g. lib-v0.2.0 — creates & pushes the tag, then publishes. Leave blank to publish a -SNAPSHOT.'
+        required: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create & push the release tag
+      packages: write   # publish to GitHub Packages
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: rel
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          if [ -n "$TAG" ] && ! echo "$TAG" | grep -Eq '^lib-v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Version '$TAG' is not lib-vX.Y.Z" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # workflow_dispatch with a version: create & push the git tag here, so a
+      # release can be cut from the Actions UI without pushing a tag by hand.
+      # The tag push uses GITHUB_TOKEN, so it does not re-trigger this workflow.
+      - name: Create release tag
+        if: github.event_name == 'workflow_dispatch' && steps.rel.outputs.tag != ''
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on origin — publishing from it."
+          else
+            echo "Creating and pushing tag $TAG at ${{ github.sha }}."
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "Release $TAG" "${{ github.sha }}"
+            git push origin "refs/tags/$TAG"
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant gradlew permission
+        run: chmod +x gradlew
+
+      # Empty LIB_RELEASE_TAG -> build.gradle.kts falls back to <next>-SNAPSHOT.
+      - name: Publish to GitHub Packages
+        run: ./gradlew :lib:publishReleasePublicationToGitHubPackagesRepository
+        env:
+          LIB_RELEASE_TAG: ${{ steps.rel.outputs.tag }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
