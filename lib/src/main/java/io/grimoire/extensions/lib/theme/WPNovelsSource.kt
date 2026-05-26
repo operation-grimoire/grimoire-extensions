@@ -55,11 +55,16 @@ abstract class WPNovelsSource : ParsedHttpSource() {
         params.append("s=").append(URLEncoder.encode(query, "UTF-8"))
             .append("&post_type=wp-manga")
         for (filter in filters) when (filter) {
-            is AuthorFilter -> if (filter.state.isNotBlank()) {
-                params.append("&author=").append(URLEncoder.encode(filter.state.trim(), "UTF-8"))
-            }
-            is TeamFilter -> if (filter.state.isNotBlank()) {
-                params.append("&artist=").append(URLEncoder.encode(filter.state.trim(), "UTF-8"))
+            is Filter.Text -> if (filter.state.isNotBlank()) {
+                val param = when (filter.name) {
+                    AUTHOR_FILTER_NAME -> "author"
+                    TEAM_FILTER_NAME -> "artist"
+                    else -> null
+                }
+                if (param != null) {
+                    params.append('&').append(param).append('=')
+                        .append(URLEncoder.encode(filter.state.trim(), "UTF-8"))
+                }
             }
             is SortFilter -> {
                 val slug = SORT_SLUGS.getOrNull(filter.state).orEmpty()
@@ -180,8 +185,10 @@ abstract class WPNovelsSource : ParsedHttpSource() {
 
     override fun getFilterList(): List<Filter<*>> = buildList {
         add(SortFilter())
-        add(AuthorFilter())
-        add(TeamFilter())
+        // Filter.Text and Filter.CheckBox are final in the API so they
+        // cannot be subclassed; dispatch on `name` in searchNovelsRequest.
+        add(Filter.Text(AUTHOR_FILTER_NAME))
+        add(Filter.Text(TEAM_FILTER_NAME))
         add(AdultContentFilter())
         add(GenresMatchFilter())
         add(StatusGroup())
@@ -219,9 +226,6 @@ abstract class WPNovelsSource : ParsedHttpSource() {
                 )?.trim()?.takeIf { it.isNotEmpty() } ?: slug
             slug to label
         }.distinctBy { it.first }
-
-    private class AuthorFilter : Filter.Text("Author")
-    private class TeamFilter : Filter.Text("Team")
 
     // Mirrors the `m_orderby` dropdown above the search results — order
     // matches the visible labels and indexes into SORT_SLUGS. Relevance is
@@ -275,6 +279,11 @@ abstract class WPNovelsSource : ParsedHttpSource() {
 
         // Order mirrors the AdultContentFilter labels; index 0 is "All".
         val ADULT_SLUGS = arrayOf("", "0", "1")
+
+        // Filter.Text is final in the API so author/team filters can't be
+        // tagged by type — dispatch on these constants instead.
+        const val AUTHOR_FILTER_NAME = "Author"
+        const val TEAM_FILTER_NAME = "Team"
     }
 
     // Madara lazy-loads cover images: the real URL lives in a data-* attribute
