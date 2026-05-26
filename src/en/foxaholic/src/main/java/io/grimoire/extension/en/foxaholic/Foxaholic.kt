@@ -21,7 +21,7 @@ import java.util.Locale
     name = "Foxaholic",
     lang = "en",
     baseUrl = "https://www.foxaholic.com",
-    versionCode = 6,
+    versionCode = 8,
 )
 class Foxaholic : WPNovelsSource() {
     override val id = 5L
