@@ -13,7 +13,7 @@ val publishVersion: String =
         ?.removePrefix("lib-v")
         ?.removePrefix("v")
         ?.takeIf { it.isNotEmpty() }
-        ?: "0.1.0-SNAPSHOT"
+        ?: "0.2.0-SNAPSHOT"
 
 android {
     namespace = "io.grimoire.extensions.lib"

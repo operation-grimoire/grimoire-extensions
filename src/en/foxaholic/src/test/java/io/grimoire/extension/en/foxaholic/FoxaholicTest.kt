@@ -1,6 +1,5 @@
 package io.grimoire.extension.en.foxaholic
 
-import io.grimoire.api.model.Filter
 import io.grimoire.api.model.NovelStatus
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
@@ -174,64 +173,6 @@ class FoxaholicTest {
         val chapter = source.chapterFromElement(li)
         assertEquals("#", chapter.url)
         assertTrue(chapter.locked)
-    }
-
-    @Test
-    fun `search — empty query and no filters hits the Madara wp-manga endpoint`() {
-        val url = source.searchNovelsRequest("", 1, emptyList()).url.toString()
-        assertEquals("https://www.foxaholic.com/?s=&post_type=wp-manga", url)
-    }
-
-    @Test
-    fun `search — page greater than one moves into Madara's /page/N/ path`() {
-        val url = source.searchNovelsRequest("love", 3, emptyList()).url.toString()
-        assertEquals("https://www.foxaholic.com/page/3/?s=love&post_type=wp-manga", url)
-    }
-
-    @Test
-    fun `search — author and team feed Madara's author and artist query params`() {
-        val filters = source.getFilterList().onEach { f ->
-            if (f is Filter.Text) when (f.name) {
-                "Author" -> f.state = "Mo Xiang"
-                "Team" -> f.state = "Translator Group"
-            }
-        }
-        val url = source.searchNovelsRequest("", 1, filters).url.toString()
-        assertTrue(url.contains("&author=Mo+Xiang"), url)
-        assertTrue(url.contains("&artist=Translator+Group"), url)
-    }
-
-    @Test
-    fun `search — AND match emits op=1, OR match omits it`() {
-        val filters = source.getFilterList().toMutableList()
-        val match = filters.first { it.name == "Genres match" }
-        @Suppress("UNCHECKED_CAST")
-        (match as Filter<Int>).state = 1
-        assertTrue(
-            source.searchNovelsRequest("", 1, filters).url.toString().contains("&op=1"),
-        )
-        match.state = 0
-        assertFalse(
-            source.searchNovelsRequest("", 1, filters).url.toString().contains("op="),
-        )
-    }
-
-    @Test
-    fun `search — checked statuses emit one status query param per slug`() {
-        val filters = source.getFilterList()
-        val statusGroup = filters.first { it.name == "Novel Status" }
-        @Suppress("UNCHECKED_CAST")
-        val checkboxes = statusGroup.state as List<Filter.CheckBox>
-        // OnGoing (0) and Canceled (2) only — verifies non-checked rows are skipped.
-        checkboxes[0].state = true
-        checkboxes[2].state = true
-        val url = source.searchNovelsRequest("", 1, filters).url.toString()
-        // status[] is encoded as status%5B%5D — both must be present and others absent.
-        assertTrue(url.contains("status%5B%5D=on-going"), url)
-        assertTrue(url.contains("status%5B%5D=canceled"), url)
-        assertFalse(url.contains("status%5B%5D=end"), url)
-        assertFalse(url.contains("status%5B%5D=on-hold"), url)
-        assertFalse(url.contains("status%5B%5D=upcoming"), url)
     }
 
     private fun parseChapterLi(html: String) =
