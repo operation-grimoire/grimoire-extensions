@@ -4,66 +4,10 @@ on:
   pull_request:
     branches: [main]
 
-concurrency:
-  group: pr-build-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
-  detect:
-    runs-on: ubuntu-latest
-    outputs:
-      modules: ${{ steps.scan.outputs.modules }}
-      has_changes: ${{ steps.scan.outputs.has_changes }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect changed extensions
-        id: scan
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 scripts/detect_pr_changes.py
-
-      - name: Summary
-        run: |
-          echo "has_changes=${{ steps.scan.outputs.has_changes }}"
-          echo "modules=${{ steps.scan.outputs.modules }}"
-
-  build:
-    needs: detect
-    if: needs.detect.outputs.has_changes == 'true'
-    runs-on: ubuntu-latest
+  pr-build:
+    uses: operation-grimoire/extensions-ci/.github/workflows/pr-build.yml@v1
+    secrets: inherit
     permissions:
       contents: read
       packages: read
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - name: Grant gradlew permission
-        run: chmod +x gradlew
-
-      # Compile-checks the changed extensions without signing or releasing —
-      # a release build still happens on push to main. Unit tests run on each
-      # changed module too, so extensions that ship tests (e.g. parser
-      # fixtures) catch regressions before they merge.
-      - name: Assemble debug APKs and run unit tests
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          targets=""
-          for m in ${{ needs.detect.outputs.modules }}; do
-            targets="$targets $m:assembleDebug $m:testDebugUnitTest"
-          done
-          echo "Building:$targets"
-          ./gradlew $targets --build-cache --stacktrace

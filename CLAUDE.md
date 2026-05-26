@@ -10,7 +10,10 @@ browser backed by a generated `index.json`.
   `settings.gradle.kts` auto-includes any such dir with a `build.gradle.kts` as
   module `:{lang}-{name}`.
 - `lib/` — shared base classes (`NovelFullThemeSource`, `WPNovelsSource`) that
-  several extensions subclass.
+  several extensions subclass. Also **published** to GitHub Packages as
+  `io.grimoire:extensions-lib` for sibling extension repos (e.g. the private
+  R18 repo); see "Publishing `lib/`" below. The extensions in *this* repo
+  consume it as `project(":lib")` — only sibling repos consume the artifact.
 - Model/network types come from the `grimoire-extensions-api` dependency.
 
 ## Versioning — bump on every change to an extension
@@ -37,3 +40,56 @@ Rules:
 - Changing a shared base class in `lib/` affects every subclass: bump the
   version of every extension that subclasses it, or the change won't ship to
   them.
+
+## Publishing `lib/`
+
+`lib/` is published to GitHub Packages as `io.grimoire:extensions-lib` so
+sibling extension repos can consume it as a Maven dependency. The contract
+mirrors `grimoire-extensions-api`: a `lib-vX.Y.Z` git tag publishes the
+immutable release; every other build publishes `<next>-SNAPSHOT`.
+
+The published version is computed in `lib/build.gradle.kts` (`publishVersion`):
+
+- No `LIB_RELEASE_TAG` env → `<base>-SNAPSHOT`. Every push to `main` publishes
+  this mutable SNAPSHOT, for developing sibling repos against unreleased
+  changes.
+- `LIB_RELEASE_TAG` set → the concrete `X.Y.Z`. The **Publish lib/ to GitHub
+  Packages** workflow sets it from a pushed `lib-vX.Y.Z` git tag.
+
+### SemVer rules
+
+Sibling repos build their extensions against this artifact, so the version
+signals what they need to do on bump:
+
+- **PATCH** — bug fix in an existing base class, no API surface change.
+- **MINOR** — additive (new helper, new method on a base class). Existing
+  subclasses keep compiling untouched.
+- **MAJOR** — removed/renamed/retyped API on a shared base class, or any
+  behavior change that requires subclasses to update. Sibling repos must
+  rebuild their extensions and bump each extension's `versionCode`.
+
+A `lib/` change does NOT need to bump this repo's extensions' versions for
+*publishing* — they consume `project(":lib")` and rebuild from source. The
+bump-every-subclass rule above still applies for *behavioral* changes that
+should ship to users.
+
+### To cut a release
+
+1. Push a `lib-vX.Y.Z` tag on `main`:
+   `git tag -a lib-vX.Y.Z <main-sha> -m "Release lib X.Y.Z" && git push origin lib-vX.Y.Z`
+   This triggers the Publish workflow → immutable
+   `io.grimoire:extensions-lib:X.Y.Z` on GitHub Packages.
+2. Bump the `-SNAPSHOT` base (`publishVersion` in `lib/build.gradle.kts`) to
+   the next version.
+3. Pin sibling repos to the new concrete version in their
+   `gradle/libs.versions.toml`.
+
+## CI
+
+PR builds and releases run via reusable workflows hosted in
+[`operation-grimoire/extensions-ci`](https://github.com/Operation-Grimoire/extensions-ci),
+pinned to `@v1`. `.github/workflows/pr-build.yml` and `release.yml` are thin
+stubs that delegate; the Python scripts that detect changed extensions and
+generate `index.json` live in extensions-ci. To change build behavior shared
+across all sibling repos, edit extensions-ci and cut a new `v1.x.y`; to change
+repo-specific behavior, edit the stubs here.

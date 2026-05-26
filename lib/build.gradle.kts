@@ -1,6 +1,19 @@
 plugins {
     alias(libs.plugins.android.library)
+    `maven-publish`
 }
+
+// Publication version. The publish-lib workflow builds from a lib-vX.Y.Z tag
+// and sets LIB_RELEASE_TAG to publish the immutable release X.Y.Z. Every other
+// build (main, local) publishes a -SNAPSHOT of the next version for cross-repo
+// development; bump the base below when a release is cut. See CLAUDE.md.
+val publishVersion: String =
+    System.getenv("LIB_RELEASE_TAG")
+        ?.trim()
+        ?.removePrefix("lib-v")
+        ?.removePrefix("v")
+        ?.takeIf { it.isNotEmpty() }
+        ?: "0.1.0-SNAPSHOT"
 
 android {
     namespace = "io.grimoire.extensions.lib"
@@ -23,6 +36,12 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
 }
 
 dependencies {
@@ -35,4 +54,27 @@ dependencies {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+}
+
+afterEvaluate {
+    publishing {
+        repositories {
+            maven {
+                name = "GitHubPackages"
+                url = uri("https://maven.pkg.github.com/Operation-Grimoire/grimoire-extensions")
+                credentials {
+                    username = System.getenv("GITHUB_ACTOR")
+                    password = System.getenv("GITHUB_TOKEN")
+                }
+            }
+        }
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+                groupId = "io.grimoire"
+                artifactId = "extensions-lib"
+                version = publishVersion
+            }
+        }
+    }
 }
