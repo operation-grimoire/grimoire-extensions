@@ -1,4 +1,4 @@
-name: PR Build (dry-run)
+name: PR Build (preview)
 
 on:
   pull_request:
@@ -6,8 +6,9 @@ on:
 
 jobs:
   pr-build:
-    uses: operation-grimoire/extensions-ci/.github/workflows/pr-build.yml@v1
+    uses: operation-grimoire/extensions-ci/.github/workflows/pr-build.yml@v2
     secrets: inherit
     permissions:
-      contents: read
+      contents: write
       packages: read
+      pull-requests: write

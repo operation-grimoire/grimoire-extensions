@@ -1,0 +1,13 @@
+name: PR preview cleanup
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  pr-cleanup:
+    uses: operation-grimoire/extensions-ci/.github/workflows/pr-cleanup.yml@v2
+    secrets: inherit
+    permissions:
+      contents: write
