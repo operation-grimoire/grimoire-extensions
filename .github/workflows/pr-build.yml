@@ -6,7 +6,7 @@ on:
 
 jobs:
   pr-build:
-    uses: operation-grimoire/extensions-ci/.github/workflows/pr-build.yml@v1
+    uses: operation-grimoire/extensions-ci/.github/workflows/pr-build.yml@v2
     secrets: inherit
     permissions:
       contents: write

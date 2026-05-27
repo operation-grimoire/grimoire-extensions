@@ -7,7 +7,7 @@ on:
 
 jobs:
   pr-cleanup:
-    uses: operation-grimoire/extensions-ci/.github/workflows/pr-cleanup.yml@v1
+    uses: operation-grimoire/extensions-ci/.github/workflows/pr-cleanup.yml@v2
     secrets: inherit
     permissions:
       contents: write

@@ -17,7 +17,7 @@ on:
 
 jobs:
   release:
-    uses: operation-grimoire/extensions-ci/.github/workflows/release.yml@v1
+    uses: operation-grimoire/extensions-ci/.github/workflows/release.yml@v2
     secrets: inherit
     permissions:
       contents: write
