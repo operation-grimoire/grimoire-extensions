@@ -18,7 +18,6 @@ import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
-import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -29,29 +28,31 @@ import java.io.IOException
  * host app reads here): every search is constrained to `extensions[]=EPUB` and
  * non-EPUB results are skipped defensively.
  *
- * Z-Library serves search results from a JSON endpoint (`POST /api/search`) and
- * renders its "Most Popular" shelf as plain HTML on the landing page — the old
- * `z-bookcard` scraping never matched, which is why search/popular/latest were
- * empty. Books are whole-book EPUB files, so this is an [EpubSource]: the host
- * downloads the bytes via [getEpub] and parses them locally; [chapterListParse]
- * / [pageListParse] are intentionally empty.
+ * Everything runs against a single host (default `z-library.im`): the homepage
+ * renders the "Most Popular" shelf, `GET /s/<query>` serves search results as
+ * `<z-bookcard>` HTML, and `/book/…` + `/dl/…` serve details and downloads.
+ * (An earlier split routed search through the `z-library.bz` landing domain's
+ * `POST /api/search` JSON, but that endpoint 404s on the per-user mirror while
+ * `/s/` is served everywhere — so one host now covers all of it.) Books are
+ * whole-book EPUB files, so this is an [EpubSource]: the host downloads the
+ * bytes via [getEpub] and parses them locally; [chapterListParse] /
+ * [pageListParse] are intentionally empty.
  *
  * Downloads work anonymously within Z-Library's daily quota; optional account
  * credentials ([ConfigurableSource]) raise/remove that limit. Cloudflare is
  * handled transparently by the default OkHttp client.
  *
- * Note: Z-Library rotates mirror domains (the landing domain proxies to a
- * per-user mirror that book/download links point at) and tweaks its markup, so
- * search/popular parsing, download-link resolution and login are each isolated
- * below so they can be adjusted against live responses without touching the
- * rest of the source.
+ * Note: Z-Library rotates mirror domains and tweaks its markup, so the host is
+ * a user-editable preference, and shelf/search parsing, download-link
+ * resolution and login are each isolated below so they can be adjusted against
+ * live responses without touching the rest of the source.
  */
 @SourceInfo(
     id = 6L,
     name = "Z-Library",
     lang = "all",
-    baseUrl = "https://z-library.bz",
-    versionCode = 20,
+    baseUrl = "https://z-library.im",
+    versionCode = 21,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource {
 
@@ -59,15 +60,12 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
     override val name = "Z-Library"
     override val lang = "all"
 
-    // Search/popular/latest use the landing domain's JSON API + "Most
-    // Popular" HTML shelf; that endpoint does NOT exist on the per-user
-    // mirror. Sign-in and downloads use the per-user mirror, where the
-    // session cookie is valid. These are deliberately separate hosts.
-    private val landingUrl = "https://z-library.bz"
-    private val defaultAccountMirror = "https://z-library.im"
+    // Single host for everything (shelf, /s/ search, /book details, /dl
+    // downloads, /login). Z-Library rotates mirrors, so this is user-editable.
+    private val defaultMirror = "https://z-library.im"
 
     @Volatile
-    private var accountMirror: String = defaultAccountMirror
+    private var mirror: String = defaultMirror
 
     @Volatile
     private var email: String = ""
@@ -86,18 +84,8 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
     @Volatile
     private var enabledLanguages: Set<String> = emptySet()
 
-    // The homepage shelf's <img src="/covers150/..."> is a placeholder a web
-    // component rewrites to an absolute CDN URL via JS, so the relative path
-    // 404s for us. The search JSON returns absolute CDN cover URLs, so we learn
-    // the current cover-CDN origin from there and prefix shelf cover paths with
-    // it. Defaults to the commonly-served origin until a search refreshes it.
-    @Volatile
-    private var coverCdnOrigin: String = "https://s3proxy-alp2-covers.cdn-zlib.sk"
-
-    // Listings always go through the landing domain (the JSON search API and
-    // "Most Popular" shelf live there, not on the per-user mirror).
     override val baseUrl: String
-        get() = landingUrl
+        get() = mirror
 
     // --- ConfigurableSource ---------------------------------------------------
 
@@ -115,26 +103,29 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
         ),
         SourcePreference.EditText(
             key = PREF_BASE_URL,
-            title = "Account mirror domain",
-            summary = "Domain used for sign-in and downloads (default " +
-                "z-library.im). Search always uses z-library.bz.",
-            default = defaultAccountMirror,
+            title = "Mirror domain",
+            summary = "Z-Library host used for everything — browsing, search, " +
+                "sign-in and downloads (default z-library.im). Change it if the " +
+                "default mirror is blocked.",
+            default = defaultMirror,
         ),
     )
 
     override fun setPreferences(values: Map<String, String>) {
         val newEmail = values[PREF_EMAIL].orEmpty().trim()
         val newPassword = values[PREF_PASSWORD].orEmpty()
-        if (newEmail != email || newPassword != password) {
+        val newMirror = values[PREF_BASE_URL]
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { normalizeBaseUrl(it) }
+            ?: defaultMirror
+        // A credential or host change invalidates per-host session state.
+        if (newEmail != email || newPassword != password || newMirror != mirror) {
             loggedInHosts.clear()
         }
         email = newEmail
         password = newPassword
-        accountMirror = values[PREF_BASE_URL]
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { normalizeBaseUrl(it) }
-            ?: defaultAccountMirror
+        mirror = newMirror
     }
 
     // --- MultiLanguageSource --------------------------------------------------
@@ -165,15 +156,17 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
     override fun latestUpdatesRequest(page: Int): Request =
         GET("$baseUrl/?$PAGE_MARKER=$page")
 
+    // Search is the server-rendered `GET /s/<query>` results page (the same
+    // host serves it; the `/api/search` JSON only exists on the landing
+    // domain). `extensions[]=EPUB` constrains to EPUB; `page` paginates.
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
-        val body = FormBody.Builder()
-            .add("q", query.trim())
-            .add("page", page.toString())
-            .add("limit", "30")
-            .add("order", "")
-            .add("extensions[]", "EPUB")
+        val url = baseUrl.toHttpUrlOrNull()!!.newBuilder()
+            .addPathSegment("s")
+            .addPathSegment(query.trim())
+            .addQueryParameter("extensions[]", "EPUB")
+            .apply { if (page > 1) addQueryParameter("page", page.toString()) }
             .build()
-        return Request.Builder().url("$baseUrl/api/search").post(body).build()
+        return GET(url.toString())
     }
 
     override suspend fun popularNovelsParse(response: Response): List<Novel> =
@@ -182,43 +175,31 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
     override suspend fun latestUpdatesParse(response: Response): List<Novel> =
         parseShelf(response)
 
+    // The `/s/` results page renders each hit as a `<z-bookcard>` custom element
+    // carrying href/extension/language as attributes, with title/author in
+    // `[slot]` children and the (absolute CDN) cover in the nested `<img>`.
     override suspend fun searchNovelsParse(response: Response): List<Novel> {
-        val raw = response.body?.string().orEmpty().trim()
-        if (!raw.startsWith("{")) {
-            throw IOException(
-                "Z-Library: search is unavailable right now (the server returned a " +
-                    "non-JSON response). If you changed the account mirror, note " +
-                    "search always uses z-library.bz.",
-            )
-        }
-        val json = JSONObject(raw)
-        if (json.optInt("success", 0) != 1) return emptyList()
-        val books = json.optJSONArray("books") ?: return emptyList()
-        return (0 until books.length()).mapNotNull { i ->
-            val b = books.optJSONObject(i) ?: return@mapNotNull null
-            if (!b.optString("extension").equals("epub", ignoreCase = true)) return@mapNotNull null
-            // Z-Library's API ignores language params, so filter client-side.
-            if (enabledLanguages.isNotEmpty()) {
-                val lang = b.optString("language").trim().lowercase()
-                if (lang.isNotEmpty() && lang !in enabledLanguages) return@mapNotNull null
-            }
-            val href = b.optString("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            val title = b.optString("title").trim().takeIf { it.isNotEmpty() }
+        val doc = response.asJsoup()
+        return doc.select("z-bookcard").mapNotNull { card ->
+            if (!card.attr("extension").equals("epub", ignoreCase = true)) return@mapNotNull null
+            val href = card.attr("href").trim().substringBefore('?').takeIf { it.isNotEmpty() }
                 ?: return@mapNotNull null
-            val cover = b.optString("cover").trim().takeIf { it.isNotEmpty() }
-            if (cover != null && cover.startsWith("http")) {
-                cover.toHttpUrlOrNull()?.let { coverCdnOrigin = "${it.scheme}://${it.host}" }
+            // Z-Library's search ignores any language param, so filter client-side.
+            val cardLang = card.attr("language").trim()
+            if (enabledLanguages.isNotEmpty() && cardLang.isNotEmpty() &&
+                cardLang.lowercase() !in enabledLanguages
+            ) {
+                return@mapNotNull null
             }
+            val title = card.selectFirst("[slot=title]")?.text()?.trim()
+                ?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             Novel(
                 url = href,
                 title = title,
-                author = b.optString("author").trim().takeIf { it.isNotEmpty() },
-                description = b.optString("description").trim()
-                    .let { Jsoup.parse(it).text().trim() }
-                    .takeIf { it.isNotEmpty() },
-                thumbnailUrl = cover,
-                language = b.optString("language").trim()
-                    .takeIf { it.isNotEmpty() }
+                author = card.selectFirst("[slot=author]")?.text()?.trim()
+                    ?.takeIf { it.isNotEmpty() },
+                thumbnailUrl = card.selectFirst("img")?.imageUrl(response.request.url.toString()),
+                language = cardLang.takeIf { it.isNotEmpty() }
                     ?.replaceFirstChar { it.uppercase() },
                 status = NovelStatus.COMPLETED,
             )
@@ -231,41 +212,34 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
         val pageParam = response.request.url.queryParameter(PAGE_MARKER)
         if (pageParam != null && pageParam != "1") return emptyList()
         val doc = response.asJsoup()
-        // The shelf is now plain markup: `<a href="…/book/<id>/<slug>.html">
-        // <img alt="Author — Title" src="/covers150/…"/></a>`. The legacy
-        // `z-cover` / `z-bookcard` custom elements are gone, so select anchors
-        // that wrap a cover image. Some books appear twice (with and without
-        // `?dsource=mostpopular`); strip the query and de-duplicate by URL.
+        // Each shelf entry is `<a href="…/book/<id>/<slug>.html"><z-cover
+        // author="…" title="…"><img src="<absolute CDN>" alt="Author — Title"/>
+        // </z-cover></a>`. Prefer the z-cover attributes, falling back to the
+        // img alt ("Author — Title", em dash). Some books appear twice (with and
+        // without `?dsource=mostpopular`); strip the query and de-dup by URL.
         return doc.select("a[href*=/book/]").mapNotNull { link ->
             val img = link.selectFirst("img") ?: return@mapNotNull null
             val href = link.attr("href").trim().substringBefore('?').takeIf { it.isNotEmpty() }
                 ?: return@mapNotNull null
-            val alt = img.attr("alt").trim()
-                .ifEmpty { img.attr("title").trim() }
-            // alt format: "Author — Title" (em dash); some entries omit the
-            // author and ship just the title.
-            val (author, title) = if (" — " in alt) {
+            val cover = link.selectFirst("z-cover")
+            val alt = img.attr("alt").trim().ifEmpty { img.attr("title").trim() }
+            val altAuthor: String?
+            val altTitle: String
+            if (" — " in alt) {
                 val parts = alt.split(" — ", limit = 2)
-                parts[0].trim().takeIf { it.isNotEmpty() } to parts[1].trim()
+                altAuthor = parts[0].trim().takeIf { it.isNotEmpty() }
+                altTitle = parts[1].trim()
             } else {
-                null to alt
+                altAuthor = null
+                altTitle = alt
             }
+            val title = cover?.attr("title")?.trim()?.takeIf { it.isNotEmpty() } ?: altTitle
             if (title.isEmpty()) return@mapNotNull null
-            val rawCover = listOf("data-src", "data-original", "src")
-                .map { img.attr(it) }
-                .firstOrNull { it.isNotBlank() }
-                ?.trim()
-            val thumb = when {
-                rawCover == null -> null
-                rawCover.startsWith("http") -> rawCover
-                rawCover.startsWith("/") -> "$coverCdnOrigin$rawCover"
-                else -> rawCover
-            }
             Novel(
                 url = href,
                 title = title,
-                author = author,
-                thumbnailUrl = thumb,
+                author = cover?.attr("author")?.trim()?.takeIf { it.isNotEmpty() } ?: altAuthor,
+                thumbnailUrl = img.imageUrl(response.request.url.toString()),
                 status = NovelStatus.COMPLETED,
             )
         }.distinctBy { it.url }
@@ -604,7 +578,7 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
                     message = "Enter both an email and a password.",
                 )
             }
-            val host = accountMirror.toHttpUrlOrNull()?.host ?: "z-library.im"
+            val host = baseUrl.toHttpUrlOrNull()?.host ?: "z-library.im"
             loggedInHosts.remove(host)
             when (val error = performLogin(host)) {
                 null -> {
