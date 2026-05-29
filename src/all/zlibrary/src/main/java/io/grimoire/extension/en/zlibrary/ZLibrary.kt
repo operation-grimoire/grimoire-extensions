@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.bz",
-    versionCode = 18,
+    versionCode = 20,
 )
 class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource {
 
@@ -231,33 +231,40 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
         val pageParam = response.request.url.queryParameter(PAGE_MARKER)
         if (pageParam != null && pageParam != "1") return emptyList()
         val doc = response.asJsoup()
-        // The homepage lists some books twice (with and without a ?dsource
-        // query); after stripping the query their URLs collide, which would
-        // crash the host's keyed list — so de-duplicate by URL.
-        return doc.select("z-cover").mapNotNull { cover ->
-            val link = generateSequence(cover.parent()) { it.parent() }
-                .firstOrNull { it.tagName() == "a" && it.hasAttr("href") }
-            val href = link?.attr("href")?.trim()?.substringBefore('?')?.takeIf { it.isNotEmpty() }
+        // The shelf is now plain markup: `<a href="…/book/<id>/<slug>.html">
+        // <img alt="Author — Title" src="/covers150/…"/></a>`. The legacy
+        // `z-cover` / `z-bookcard` custom elements are gone, so select anchors
+        // that wrap a cover image. Some books appear twice (with and without
+        // `?dsource=mostpopular`); strip the query and de-duplicate by URL.
+        return doc.select("a[href*=/book/]").mapNotNull { link ->
+            val img = link.selectFirst("img") ?: return@mapNotNull null
+            val href = link.attr("href").trim().substringBefore('?').takeIf { it.isNotEmpty() }
                 ?: return@mapNotNull null
-            val title = cover.attr("title").trim().takeIf { it.isNotEmpty() }
-                ?: return@mapNotNull null
-            // Shelf <img src> is a placeholder; the real cover is the same path
-            // served by the cover CDN (learned from the search API).
-            val rawCover = cover.selectFirst("img")
-                ?.let { listOf("data-src", "data-original", "src").map(it::attr) }
-                ?.firstOrNull { it.isNotBlank() }
+            val alt = img.attr("alt").trim()
+                .ifEmpty { img.attr("title").trim() }
+            // alt format: "Author — Title" (em dash); some entries omit the
+            // author and ship just the title.
+            val (author, title) = if (" — " in alt) {
+                val parts = alt.split(" — ", limit = 2)
+                parts[0].trim().takeIf { it.isNotEmpty() } to parts[1].trim()
+            } else {
+                null to alt
+            }
+            if (title.isEmpty()) return@mapNotNull null
+            val rawCover = listOf("data-src", "data-original", "src")
+                .map { img.attr(it) }
+                .firstOrNull { it.isNotBlank() }
                 ?.trim()
             val thumb = when {
                 rawCover == null -> null
                 rawCover.startsWith("http") -> rawCover
-                rawCover.startsWith("/cover") -> "$coverCdnOrigin$rawCover"
                 rawCover.startsWith("/") -> "$coverCdnOrigin$rawCover"
                 else -> rawCover
             }
             Novel(
                 url = href,
                 title = title,
-                author = cover.attr("author").trim().takeIf { it.isNotEmpty() },
+                author = author,
                 thumbnailUrl = thumb,
                 status = NovelStatus.COMPLETED,
             )
