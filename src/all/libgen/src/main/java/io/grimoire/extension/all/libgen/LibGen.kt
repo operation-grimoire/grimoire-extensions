@@ -158,34 +158,58 @@ class LibGen :
 
     // --- Listings (always EPUB-constrained) -----------------------------------
 
-    // This fork has no popularity metric and no anonymous "browse all", so
-    // popular/latest both run one broad query and reuse the results parser. A
-    // generic book word (an empty `req` returns nothing, and a stop-word like
-    // "the" skews to non-EPUB comics) keeps the EPUB-filtered result set full.
-    override fun popularNovelsRequest(page: Int): Request = searchUrl(BROWSE_QUERY, page)
+    // popular/latest have no metric on this fork, so they browse all EPUBs
+    // (a bare `ext:epub` query) restricted to the enabled languages.
+    override fun popularNovelsRequest(page: Int): Request = searchUrl("", page)
 
-    override fun latestUpdatesRequest(page: Int): Request = searchUrl(BROWSE_QUERY, page)
+    override fun latestUpdatesRequest(page: Int): Request = searchUrl("", page)
 
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request =
-        searchUrl(query.trim().ifEmpty { BROWSE_QUERY }, page)
+        searchUrl(query.trim(), page)
 
-    // Fiction + non-fiction, title column. EPUB is enforced client-side (the
-    // search has no dependable extension parameter — every candidate is ignored).
+    // Built in LibGen's "Google mode" (gmode=on), which accepts `field:value`
+    // terms: `ext:epub` constrains to EPUB and `lang:<iso639-2>` to a language —
+    // both server-side, so no client-side format/extension juggling. Multiple
+    // languages can't be OR'd in one query, so when several are enabled the
+    // request rotates through them by page (each page is one language; paging
+    // surfaces the rest).
     private fun searchUrl(query: String, page: Int): Request {
+        val lang = languageForPage(page)
+        val req = buildList {
+            when {
+                query.isNotBlank() -> add(query)
+                // A bare `ext:epub` (no keyword, no language) matches the whole
+                // catalogue and the server sometimes drops it, returning an empty
+                // page; a light seed keeps the unfiltered browse reliable. With a
+                // language the `lang:` term already constrains it, so no seed
+                // (which would skew the language) is needed.
+                lang == null -> add(BROWSE_SEED)
+            }
+            add("ext:epub")
+            lang?.let { add("lang:$it") }
+        }.joinToString(" ")
         val url = baseUrl.toHttpUrlOrNull()!!.newBuilder()
             .addPathSegment("index.php")
-            .addQueryParameter("req", query)
+            .addQueryParameter("req", req)
             .addQueryParameter("columns[]", "t")
             .addQueryParameter("objects[]", "f")
             .addQueryParameter("topics[]", "f")
             .addQueryParameter("topics[]", "l")
             .addQueryParameter("res", "100")
+            .addQueryParameter("gmode", "on")
             // Renders each row's cover thumbnail (`/covers|fictioncovers/…`),
             // which the listing omits by default.
             .addQueryParameter("covers", "on")
             .apply { if (page > 1) addQueryParameter("page", page.toString()) }
             .build()
         return GET(url.toString())
+    }
+
+    // The lang: code to constrain this page to, or null for "all languages".
+    private fun languageForPage(page: Int): String? {
+        val codes = enabledLanguages.toSortedSet().mapNotNull { LANGUAGE_CODES[it] }
+        if (codes.isEmpty()) return null
+        return codes[(page - 1).coerceAtLeast(0) % codes.size]
     }
 
     override suspend fun popularNovelsParse(response: Response): List<Novel> =
@@ -232,9 +256,12 @@ class LibGen :
             // cell that would otherwise shift fixed front indices.
             val language = cells.getOrNull(cells.size - 5)?.text()?.trim()
                 ?.takeIf { it.isNotEmpty() }
-            if (enabledLanguages.isNotEmpty() &&
-                language?.lowercase() !in enabledLanguages
-            ) {
+            // The server already constrains by lang:, but a row can be tagged
+            // multi-language ("English;German"); keep it if any of its languages
+            // is enabled (safety net for an unmapped language code).
+            val rowLangs = language?.split(';', ',')
+                ?.map { it.trim().lowercase() }?.filter { it.isNotEmpty() }.orEmpty()
+            if (enabledLanguages.isNotEmpty() && rowLangs.none { it in enabledLanguages }) {
                 return@mapNotNull null
             }
             val editionUrl = resolveAgainst(pageUrl, editionLink.attr("href").trim())
@@ -367,38 +394,37 @@ class LibGen :
 
     // --- Host failover --------------------------------------------------------
 
-    // Transparently rotates a request across the mirror list. Requests aimed at a
-    // known mirror host are retried against the remaining mirrors on a connection
-    // error or 5xx; the first mirror to answer becomes the new active host. A 4xx
-    // is a real answer (same on every mirror), so it is returned as-is. Requests
-    // to other hosts (an app-pinned mirror we don't know, a CDN redirect target)
-    // pass through untouched.
+    // Adds a same-host Referer to every mirror request (cover hosts hotlink-protect
+    // images and otherwise 200 with an empty body) and rotates *page* requests
+    // (index.php / edition.php) across the mirror list on a connection error, 5xx,
+    // or an empty listing. Per-file requests — covers and the key-bound download
+    // chain (ads.php → get.php) — are tied to one host, so they only get the
+    // Referer and never rotate (rotating could 404 a host-specific file or void
+    // the download key). Requests to unknown hosts pass through untouched.
     private inner class HostFailoverInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
             val original = chain.request()
             val tryHosts = hosts.mapNotNull { it.toHttpUrlOrNull() }
             val knownHosts = tryHosts.map { it.host }.toSet()
-            // The download chain (ads.php → get.php) is key-bound to one mirror:
-            // the get.php `key` issued by a host's ads.php is rejected elsewhere.
-            // Never rotate those requests across hosts — getEpub already runs them
-            // against the live active host and retries transient failures.
             if (original.url.host !in knownHosts) return chain.proceed(original)
-            // Cover/thumbnail hosts hotlink-protect images: without a same-host
-            // Referer they 200 with an empty body. Send one on every mirror
-            // request (harmless for pages, required for /covers|fictioncovers/).
+
             val path = original.url.encodedPath
-            val isDownload = path.endsWith("/ads.php") || path.endsWith("/get.php")
-            if (isDownload) {
-                // The download chain (ads.php → get.php) is key-bound to one
-                // mirror, so getEpub drives the host rotation; never rewrite here.
+            val isPage = path.endsWith("/index.php") || path.endsWith("/edition.php")
+            if (!isPage) {
                 return chain.proceed(original.withReferer(original.url.scheme, original.url.host))
             }
+
+            // A search/listing page is the one place a mirror can answer 200 yet
+            // be useless: the heaviest queries (e.g. all English EPUBs) sometimes
+            // return the bare search UI with no results table. Treat that as a
+            // soft failure and fall through to the next mirror.
+            val isListing = path.endsWith("/index.php")
 
             // Start from the active host, then the rest in declared order.
             val ordered = (listOf(activeHost.toHttpUrlOrNull()).filterNotNull() + tryHosts)
                 .distinctBy { it.host }
             var lastError: IOException? = null
-            for (host in ordered) {
+            for ((index, host) in ordered.withIndex()) {
                 val rewritten = original.newBuilder()
                     .url(original.url.newBuilder().scheme(host.scheme).host(host.host).build())
                     .build()
@@ -406,6 +432,14 @@ class LibGen :
                 try {
                     val resp = chain.proceed(rewritten)
                     if (resp.code < 500) {
+                        val lastHost = index == ordered.lastIndex
+                        if (isListing && resp.isSuccessful && !lastHost &&
+                            "edition.php" !in resp.peekBody(PEEK_BYTES).string()
+                        ) {
+                            resp.close()
+                            lastError = IOException("empty results from ${host.host}")
+                            continue
+                        }
                         activeHostBacking = "${host.scheme}://${host.host}"
                         return resp
                     }
@@ -467,10 +501,29 @@ class LibGen :
         private const val PREF_BASE_URL = "base_url"
         private const val MAX_RETRIES = 3
 
-        // Seeds the popular/latest browse: a generic book word that returns a
-        // large, EPUB-rich result set (stop-words like "the"/"of" return
-        // non-EPUB comics or nothing on this fork).
-        private const val BROWSE_QUERY = "novel"
+        // Upper bound for sniffing a listing response for a results table; a full
+        // results page is ~230 KB, so 1 MB always covers it.
+        private const val PEEK_BYTES = 1L * 1024 * 1024
+
+        // Light keyword for the unfiltered popular/latest browse, so it isn't a
+        // bare catalogue-wide `ext:epub` query (which the server sometimes drops).
+        private const val BROWSE_SEED = "novel"
+
+        // Enabled-language name (lowercase) -> LibGen `lang:` code (ISO 639-2/B,
+        // the bibliographic three-letter form the catalogue uses). Keyed by the
+        // names declared in availableLanguages().
+        private val LANGUAGE_CODES = mapOf(
+            "english" to "eng", "spanish" to "spa", "portuguese" to "por",
+            "french" to "fre", "german" to "ger", "italian" to "ita",
+            "dutch" to "dut", "russian" to "rus", "ukrainian" to "ukr",
+            "polish" to "pol", "czech" to "cze", "romanian" to "rum",
+            "greek" to "gre", "turkish" to "tur", "arabic" to "ara",
+            "hebrew" to "heb", "hindi" to "hin", "bengali" to "ben",
+            "chinese" to "chi", "japanese" to "jpn", "korean" to "kor",
+            "vietnamese" to "vie", "thai" to "tha", "indonesian" to "ind",
+            "swedish" to "swe", "norwegian" to "nor", "danish" to "dan",
+            "finnish" to "fin", "hungarian" to "hun", "persian" to "fas",
+        )
 
         private val DEFAULT_MIRRORS = listOf(
             "https://libgen.la",
