@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Azure Chronicles",
     lang = "en",
     baseUrl = "https://azurechronicles.com",
-    versionCode = 4,
+    versionCode = 1,
 )
 class AzureChronicles : HttpSource(), WebViewLoginSource {
 
@@ -103,25 +103,26 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
                 .ifEmpty { link.text().trim() }
                 .takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             Novel(
-                url = absUrl(href),
+                url = absoluteUrl(href),
                 title = title,
                 thumbnailUrl = coverUrl(link),
             )
         }.distinctBy { it.url }
 
     // The /type/novel/ archive + filter endpoint use `article.ac-grid2-card`.
+    // Select only the cover anchor: the card also has a separate title anchor to
+    // the same URL with no cover, and de-duplicating by URL could otherwise drop
+    // the cover-bearing one.
     private fun parseCards(doc: Document): List<Novel> =
-        parseCardLinks(doc, "article.ac-grid2-card a.ac-grid2-cover-link, article.ac-grid2-card a[href*=/novel/]")
+        parseCardLinks(doc, "article.ac-grid2-card a.ac-grid2-cover-link")
 
-    // Request routing, anonymous-first:
-    //  - no query, no filters        -> browse archive
-    //  - plain query                 -> ac_search_series (nonce-free)
-    //  - a single genre OR tag       -> the server-rendered /genre|/tag archive
-    //                                   (nonce-free, paginated, original covers)
-    //  - anything richer (multi-tax, sort/status/translator, query+filter)
-    //                                -> ac_archive_filter_novels, which needs the
-    //                                   ajax nonce — valid only for a signed-in
-    //                                   session (see ensureNonce / the parser).
+    // Request routing:
+    //  - no query, no filters -> browse archive
+    //  - plain query          -> ac_search_series (JSON)
+    //  - any filter           -> ac_archive_filter_novels (genre[]/tag[]/sort/
+    //                            status/translator), which works anonymously
+    //                            once given the archive's filter nonce (the
+    //                            `const nonce` scraped by ensureNonce).
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
         val q = query.trim()
         val genres = selectedGroup(filters, "genre[]")
@@ -129,15 +130,10 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
         val sort = selectedSelect(filters, "sort")
         val status = selectedSelect(filters, "status")
         val translator = selectedSelect(filters, "translator")
-        val hasScalar = q.isNotEmpty() || sort != null || status != null || translator != null
+        val anyFilter = genres.isNotEmpty() || tags.isNotEmpty() ||
+            sort != null || status != null || translator != null
 
-        // Single-facet taxonomy archives work without the ajax nonce.
-        if (!hasScalar && tags.isEmpty() && genres.size == 1) return taxonomyRequest("genre", genres[0], page)
-        if (!hasScalar && genres.isEmpty() && tags.size == 1) return taxonomyRequest("tag", tags[0], page)
-
-        val noFilters = genres.isEmpty() && tags.isEmpty() &&
-            sort == null && status == null && translator == null
-        if (noFilters) {
+        if (!anyFilter) {
             if (q.isEmpty()) return browseRequest(page)
             val url = adminAjax()
                 .addQueryParameter("action", "ac_search_series")
@@ -161,9 +157,6 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
         return GET(b.build().toString())
     }
 
-    private fun taxonomyRequest(type: String, slug: String, page: Int): Request =
-        if (page <= 1) GET("$baseUrl/$type/$slug/") else GET("$baseUrl/$type/$slug/page/$page/")
-
     // Checked slugs of the genre/tag group identified by [param].
     private fun selectedGroup(filters: List<Filter<*>>, param: String): List<String> =
         filters.filterIsInstance<CheckGroupFilter>().firstOrNull { it.param == param }
@@ -180,19 +173,16 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
         if (url.queryParameter(PAGE_MARKER).let { it != null && it != "1" }) return emptyList()
         val raw = response.body?.string().orEmpty()
         return when {
-            // Filter endpoint: cards live in the JSON's data.html fragment. A
-            // rejected/expired nonce answers "-1" (or 403) rather than JSON —
-            // this happens for anonymous sessions, so degrade to no results
-            // instead of crashing. Sign in (the nonce becomes valid) to filter.
+            // Filter endpoint: cards live in the JSON's data.html fragment.
+            // A rejected/expired nonce answers "-1"; degrade to no results
+            // instead of crashing rather than parsing it as JSON.
             "ac_archive_filter_novels" in url.toString() -> {
-                val json = runCatching { JSONObject(raw.ifBlank { "{}" }) }.getOrNull()
-                    ?: return emptyList()
-                val html = json.optJSONObject("data")?.optString("html").orEmpty()
-                parseCards(Jsoup.parse(html, baseUrl))
+                val json = runCatching { JSONObject(raw) }.getOrNull() ?: return emptyList()
+                parseCards(Jsoup.parse(json.optJSONObject("data")?.optString("html").orEmpty(), baseUrl))
             }
             // Keyword search: a flat JSON array of series objects.
             "ac_search_series" in url.toString() -> parseSearchJson(raw)
-            // Fallback: a browse listing page (blank query, no filters).
+            // Browse archive page (no query, no filters).
             else -> parseCards(Jsoup.parse(raw, url.toString()))
         }
     }
@@ -207,7 +197,7 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
             val title = item.optString("title").trim().takeIf { it.isNotEmpty() }
                 ?: return@mapNotNull null
             Novel(
-                url = absUrl(href),
+                url = absoluteUrl(href),
                 title = title,
                 thumbnailUrl = item.optString("cover").trim().takeIf { it.isNotEmpty() },
                 genres = item.optString("genres").split(',')
@@ -337,7 +327,7 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
             val locked = link.attr("data-ac-locked").trim() == "1" ||
                 (link.attr("data-ac-cost").trim().toIntOrNull() ?: 0) > 0
             Chapter(
-                url = absUrl(href),
+                url = absoluteUrl(href),
                 name = label,
                 chapterNumber = number,
                 uploadDate = parseDate(link.attr("data-ac-chapter-date")),
@@ -429,11 +419,14 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
         return fetched.orEmpty()
     }
 
+    // The archive's filter script declares its own `const nonce = "…"`, which is
+    // the one `ac_archive_filter_novels` accepts. (The page also has a separate,
+    // unrelated `acData.nonce` that this endpoint rejects — don't use it.)
     private fun extractNonce(html: String): String? =
-        Regex("""nonce:\s*'([^']+)'""").find(html)?.groupValues?.get(1)
-            ?.takeIf { it.isNotEmpty() }
+        Regex("""\bconst\s+nonce\s*=\s*["']([a-f0-9]+)["']""").find(html)?.groupValues?.get(1)
+            ?: Regex("""\bnonce\s*=\s*["']([a-f0-9]+)["']""").find(html)?.groupValues?.get(1)
 
-    private fun absUrl(href: String): String = when {
+    private fun absoluteUrl(href: String): String = when {
         href.startsWith("http") -> href
         href.startsWith("//") -> "https:$href"
         href.startsWith("/") -> "$baseUrl$href"
@@ -458,7 +451,7 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
             lazyBg.forEach { name ->
                 val v = el.attr(name).trim()
                 if ((v.startsWith("http") || v.startsWith("/")) && !v.startsWith("data:")) {
-                    return absUrl(v)
+                    return absoluteUrl(v)
                 }
             }
         }
@@ -470,18 +463,19 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
         Regex("""background-image\s*:\s*url\((['"]?)(.*?)\1\)""")
             .find(el.attr("style"))?.groupValues?.get(2)?.trim()
             ?.takeIf { it.isNotEmpty() }
-            ?.let { absUrl(it) }
+            ?.let { absoluteUrl(it) }
 
     private fun Element.imageUrl(): String? {
         // Prefer eager lazy-load attributes, then src; skip inline `data:`
         // placeholders the theme uses before its lazy loader swaps in the real
-        // URL. Fall back to the first candidate in srcset.
-        listOf("data-src", "data-original", "data-lazy-src", "src").forEach { attr ->
-            val value = attr(attr).trim()
-            if (value.isNotEmpty() && !value.startsWith("data:")) return absUrl(value)
+        // URL. Fall back to the first candidate in srcset. (Note: the loop var
+        // must not be named `attr` — that would shadow Element.attr().)
+        for (name in listOf("data-src", "data-original", "data-lazy-src", "src")) {
+            val value = attr(name).trim()
+            if (value.isNotEmpty() && !value.startsWith("data:")) return absoluteUrl(value)
         }
         return attr("srcset").trim().substringBefore(" ").takeIf { it.isNotEmpty() }
-            ?.let { absUrl(it) }
+            ?.let { absoluteUrl(it) }
     }
 
     /** Maps a status word found anywhere in [text] to a [NovelStatus], or null. */
