@@ -50,7 +50,7 @@ import java.io.IOException
     name = "Library Genesis",
     lang = "all",
     baseUrl = "https://libgen.com.im",
-    versionCode = 1,
+    versionCode = 2,
 )
 class LibGen : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource {
 
@@ -164,7 +164,10 @@ class LibGen : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource
         return doc.select("div.book-item").mapNotNull { item ->
             val titleLink = item.selectFirst(".book-title a, a.book-thumb")
                 ?: return@mapNotNull null
+            // hrefs are root-relative without a leading slash ("book.php?md5=…"),
+            // so resolve to absolute against the page URL.
             val href = titleLink.attr("href").trim().takeIf { it.isNotEmpty() }
+                ?.let { resolveAgainst(pageUrl, it) }
                 ?: return@mapNotNull null
             val title = item.selectFirst(".book-title a")?.text()?.trim()
                 ?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
@@ -195,8 +198,10 @@ class LibGen : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource
         // `.placeholder-title` / `.placeholder-author`. Fall back to the img alt
         // for the title. De-dup by URL in case the shelf repeats a book.
         return doc.select("a.book-card[href]").mapNotNull { link ->
-            // Keep the full href (the ?md5=… query identifies the book).
+            // Keep the full href (the ?md5=… query identifies the book) and
+            // resolve to absolute — hrefs have no leading slash.
             val href = link.attr("href").trim().takeIf { it.isNotEmpty() }
+                ?.let { resolveAgainst(pageUrl, it) }
                 ?: return@mapNotNull null
             val title = link.selectFirst(".placeholder-title")?.text()?.trim()
                 ?.takeIf { it.isNotEmpty() }
