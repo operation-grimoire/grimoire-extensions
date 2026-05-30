@@ -378,9 +378,17 @@ class LibGen :
             // the get.php `key` issued by a host's ads.php is rejected elsewhere.
             // Never rotate those requests across hosts — getEpub already runs them
             // against the live active host and retries transient failures.
+            if (original.url.host !in knownHosts) return chain.proceed(original)
+            // Cover/thumbnail hosts hotlink-protect images: without a same-host
+            // Referer they 200 with an empty body. Send one on every mirror
+            // request (harmless for pages, required for /covers|fictioncovers/).
             val path = original.url.encodedPath
             val isDownload = path.endsWith("/ads.php") || path.endsWith("/get.php")
-            if (original.url.host !in knownHosts || isDownload) return chain.proceed(original)
+            if (isDownload) {
+                // The download chain (ads.php → get.php) is key-bound to one
+                // mirror, so getEpub drives the host rotation; never rewrite here.
+                return chain.proceed(original.withReferer(original.url.scheme, original.url.host))
+            }
 
             // Start from the active host, then the rest in declared order.
             val ordered = (listOf(activeHost.toHttpUrlOrNull()).filterNotNull() + tryHosts)
@@ -390,6 +398,7 @@ class LibGen :
                 val rewritten = original.newBuilder()
                     .url(original.url.newBuilder().scheme(host.scheme).host(host.host).build())
                     .build()
+                    .withReferer(host.scheme, host.host)
                 try {
                     val resp = chain.proceed(rewritten)
                     if (resp.code < 500) {
@@ -408,16 +417,21 @@ class LibGen :
 
     // --- Helpers --------------------------------------------------------------
 
+    private fun Request.withReferer(scheme: String, host: String): Request =
+        if (header("Referer") != null) this
+        else newBuilder().header("Referer", "$scheme://$host/").build()
+
     private fun appendMd5(url: String, md5: String): String {
         val base = url.toHttpUrlOrNull() ?: return url
         return base.newBuilder().setQueryParameter("md5", md5).build().toString()
     }
 
-    // Resolve a (possibly lazy/relative) image URL against [base].
+    // Resolve a (possibly lazy/relative) image URL against [base]. Books with no
+    // cover render the `/img/blank.png` placeholder — treat that as no cover.
     private fun Element.imageUrl(base: String = baseUrl): String? {
         val raw = listOf("data-src", "data-original", "src")
             .map { attr(it).trim() }
-            .firstOrNull { it.isNotEmpty() }
+            .firstOrNull { it.isNotEmpty() && "blank" !in it }
             ?: return null
         return when {
             raw.startsWith("http") -> raw
