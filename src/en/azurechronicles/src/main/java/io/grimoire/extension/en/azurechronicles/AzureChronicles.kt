@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Azure Chronicles",
     lang = "en",
     baseUrl = "https://azurechronicles.com",
-    versionCode = 2,
+    versionCode = 3,
 )
 class AzureChronicles : HttpSource(), WebViewLoginSource {
 
@@ -117,14 +117,31 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
     private fun parseCards(doc: Document): List<Novel> =
         parseCardLinks(doc, "article.ac-grid2-card a.ac-grid2-cover-link, article.ac-grid2-card a[href*=/novel/]")
 
-    // A plain query (no active filters) uses the simple, nonce-free
-    // `ac_search_series` endpoint. As soon as any filter is set, the request
-    // switches to `ac_archive_filter_novels`, which supports status / translator
-    // / sort / genre[] / tag[] but requires the ajax nonce. Both return a single
-    // un-paginated result set, so [PAGE_MARKER] lets the parser stop after page 1.
+    // Request routing, anonymous-first:
+    //  - no query, no filters        -> browse archive
+    //  - plain query                 -> ac_search_series (nonce-free)
+    //  - a single genre OR tag       -> the server-rendered /genre|/tag archive
+    //                                   (nonce-free, paginated, original covers)
+    //  - anything richer (multi-tax, sort/status/translator, query+filter)
+    //                                -> ac_archive_filter_novels, which needs the
+    //                                   ajax nonce — valid only for a signed-in
+    //                                   session (see ensureNonce / the parser).
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
         val q = query.trim()
-        if (filters.none(::isFilterActive)) {
+        val genres = selectedGroup(filters, "genre[]")
+        val tags = selectedGroup(filters, "tag[]")
+        val sort = selectedSelect(filters, "sort")
+        val status = selectedSelect(filters, "status")
+        val translator = selectedSelect(filters, "translator")
+        val hasScalar = q.isNotEmpty() || sort != null || status != null || translator != null
+
+        // Single-facet taxonomy archives work without the ajax nonce.
+        if (!hasScalar && tags.isEmpty() && genres.size == 1) return taxonomyRequest("genre", genres[0], page)
+        if (!hasScalar && genres.isEmpty() && tags.size == 1) return taxonomyRequest("tag", tags[0], page)
+
+        val noFilters = genres.isEmpty() && tags.isEmpty() &&
+            sort == null && status == null && translator == null
+        if (noFilters) {
             if (q.isEmpty()) return browseRequest(page)
             val url = adminAjax()
                 .addQueryParameter("action", "ac_search_series")
@@ -133,23 +150,34 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
                 .build()
             return GET(url.toString())
         }
+
         val b = adminAjax()
             .addQueryParameter("action", "ac_archive_filter_novels")
             .addQueryParameter("nonce", ensureNonce())
             .addQueryParameter("type", "novel")
             .addQueryParameter("q", q)
             .addQueryParameter(PAGE_MARKER, page.toString())
-        for (filter in filters) when (filter) {
-            is SelectFilter -> filter.slugs.getOrNull(filter.state)
-                ?.takeIf { it.isNotEmpty() }
-                ?.let { b.addQueryParameter(filter.param, it) }
-            is CheckGroupFilter -> for (cb in filter.state) {
-                if (cb.state) filter.slugByLabel[cb.name]?.let { b.addQueryParameter(filter.param, it) }
-            }
-            else -> Unit
-        }
+        genres.forEach { b.addQueryParameter("genre[]", it) }
+        tags.forEach { b.addQueryParameter("tag[]", it) }
+        sort?.let { b.addQueryParameter("sort", it) }
+        status?.let { b.addQueryParameter("status", it) }
+        translator?.let { b.addQueryParameter("translator", it) }
         return GET(b.build().toString())
     }
+
+    private fun taxonomyRequest(type: String, slug: String, page: Int): Request =
+        if (page <= 1) GET("$baseUrl/$type/$slug/") else GET("$baseUrl/$type/$slug/page/$page/")
+
+    // Checked slugs of the genre/tag group identified by [param].
+    private fun selectedGroup(filters: List<Filter<*>>, param: String): List<String> =
+        filters.filterIsInstance<CheckGroupFilter>().firstOrNull { it.param == param }
+            ?.let { group -> group.state.filter { it.state }.mapNotNull { group.slugByLabel[it.name] } }
+            .orEmpty()
+
+    // Chosen slug of the single-select [param], or null when left on its default.
+    private fun selectedSelect(filters: List<Filter<*>>, param: String): String? =
+        filters.filterIsInstance<SelectFilter>().firstOrNull { it.param == param }
+            ?.let { it.slugs.getOrNull(it.state)?.takeIf { slug -> slug.isNotEmpty() } }
 
     override suspend fun searchNovelsParse(response: Response): List<Novel> {
         val url = response.request.url
@@ -235,12 +263,6 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
             ?.let { add(CheckGroupFilter("Genres", "genre[]", it)) }
         options("ac-archive-filter-tag").filter { it.first.isNotEmpty() }.takeIf { it.isNotEmpty() }
             ?.let { tags -> add(CheckGroupFilter("Tags", "tag[]", tags.map { it.first to it.second.removePrefix("#") })) }
-    }
-
-    private fun isFilterActive(filter: Filter<*>): Boolean = when (filter) {
-        is SelectFilter -> filter.state > 0
-        is CheckGroupFilter -> filter.state.any { it.state }
-        else -> false
     }
 
     /** A single-choice filter backed by a query parameter; index 0 is the
