@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Azure Chronicles",
     lang = "en",
     baseUrl = "https://azurechronicles.com",
-    versionCode = 1,
+    versionCode = 2,
 )
 class AzureChronicles : HttpSource(), WebViewLoginSource {
 
@@ -297,8 +297,17 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
                 ?: doc.selectFirst("#ac-cover-img img, .ac-cover img")?.imageUrl()
                 ?: meta("image"),
             author = author,
-            description = doc.selectFirst(".ac-synopsis-wrap, #ac-synopsis, [class*=synopsis]")
-                ?.text()?.trim()?.takeIf { it.isNotEmpty() },
+            // The synopsis body is rendered into `#synopsis-content`; its
+            // `#synopsis-container`/`#synopsis-wrap` ancestors carry the collapse
+            // mask + "Show more" toggle, so prefer the inner id for clean text
+            // and only widen to those ancestors / a synopsis-ish class as a
+            // fallback (a grouped selector would pick the outer toggle-bearing
+            // ancestor first, since jsoup matches in document order).
+            description = (
+                doc.selectFirst("#synopsis-content")
+                    ?: doc.selectFirst("[id*=synopsis]")
+                    ?: doc.selectFirst("[class*=synopsis]")
+                )?.text()?.trim()?.takeIf { it.isNotEmpty() },
             genres = doc.select("#ac-genres-row a[href*=/genre/]")
                 .map { it.text().trim() }.filter { it.isNotEmpty() }.distinct(),
             status = status,
@@ -328,11 +337,18 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
             // A chapter is locked when the site flags it premium / priced.
             val locked = link.attr("data-ac-locked").trim() == "1" ||
                 (link.attr("data-ac-cost").trim().toIntOrNull() ?: 0) > 0
+            // Only the ~78 newest chapters render as full cards carrying
+            // data-ac-chapter-date; older rows are bare anchors whose date lives
+            // only in the trailing date span (absolute "M/d/yyyy", or a relative
+            // "14h ago" / "2d ago" for the last few days). Fall back to that span
+            // so every chapter gets an uploadDate.
+            val dateText = link.attr("data-ac-chapter-date").trim()
+                .ifEmpty { link.select("span").lastOrNull()?.text()?.trim().orEmpty() }
             Chapter(
                 url = absoluteUrl(href),
                 name = label,
                 chapterNumber = number,
-                uploadDate = parseDate(link.attr("data-ac-chapter-date")),
+                uploadDate = parseDate(dateText),
                 locked = locked,
             )
         }.distinctBy { it.url }
@@ -347,13 +363,32 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
         }
     }
 
-    // data-ac-chapter-date is "M/D/YYYY"; 0L when absent/unparseable.
+    // The chapter date is either absolute "M/D/YYYY" or a relative "14h ago" /
+    // "2d ago" / "3w ago" for recent rows; 0L when absent/unparseable. Relative
+    // values are resolved against "now" (approximate by design — the site only
+    // exposes that coarse form for the freshest chapters).
     private fun parseDate(raw: String): Long {
         val value = raw.trim().takeIf { it.isNotEmpty() } ?: return 0L
-        return runCatching {
-            java.text.SimpleDateFormat("M/d/yyyy", java.util.Locale.US)
-                .parse(value)?.time ?: 0L
-        }.getOrDefault(0L)
+        if (value.equals("just now", ignoreCase = true)) return System.currentTimeMillis()
+        if ('/' in value) {
+            runCatching {
+                java.text.SimpleDateFormat("M/d/yyyy", java.util.Locale.US).parse(value)?.time
+            }.getOrNull()?.let { return it }
+        }
+        // "<n><unit> ago" — order units longest-first so "mo" beats "m".
+        val m = Regex("""(\d+)\s*(mo|month|min|yr|sec|s|m|h|hr|hour|d|w|y)""", RegexOption.IGNORE_CASE)
+            .find(value) ?: return 0L
+        val n = m.groupValues[1].toLong()
+        val unitMs = when (m.groupValues[2].lowercase()) {
+            "mo", "month" -> 30L * 86_400_000
+            "y", "yr" -> 365L * 86_400_000
+            "w" -> 7L * 86_400_000
+            "d" -> 86_400_000L
+            "h", "hr", "hour" -> 3_600_000L
+            "m", "min" -> 60_000L
+            else -> 1_000L // s / sec
+        }
+        return System.currentTimeMillis() - n * unitMs
     }
 
     // --- Chapter content ------------------------------------------------------
