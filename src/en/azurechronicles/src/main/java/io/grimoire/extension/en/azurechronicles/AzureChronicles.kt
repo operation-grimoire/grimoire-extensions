@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Azure Chronicles",
     lang = "en",
     baseUrl = "https://azurechronicles.com",
-    versionCode = 1,
+    versionCode = 2,
 )
 class AzureChronicles : HttpSource(), WebViewLoginSource {
 
@@ -297,8 +297,17 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
                 ?: doc.selectFirst("#ac-cover-img img, .ac-cover img")?.imageUrl()
                 ?: meta("image"),
             author = author,
-            description = doc.selectFirst(".ac-synopsis-wrap, #ac-synopsis, [class*=synopsis]")
-                ?.text()?.trim()?.takeIf { it.isNotEmpty() },
+            // The synopsis body is rendered into `#synopsis-content`; its
+            // `#synopsis-container`/`#synopsis-wrap` ancestors carry the collapse
+            // mask + "Show more" toggle, so prefer the inner id for clean text
+            // and only widen to those ancestors / a synopsis-ish class as a
+            // fallback (a grouped selector would pick the outer toggle-bearing
+            // ancestor first, since jsoup matches in document order).
+            description = (
+                doc.selectFirst("#synopsis-content")
+                    ?: doc.selectFirst("[id*=synopsis]")
+                    ?: doc.selectFirst("[class*=synopsis]")
+                )?.text()?.trim()?.takeIf { it.isNotEmpty() },
             genres = doc.select("#ac-genres-row a[href*=/genre/]")
                 .map { it.text().trim() }.filter { it.isNotEmpty() }.distinct(),
             status = status,
