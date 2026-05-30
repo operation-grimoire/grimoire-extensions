@@ -432,9 +432,15 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
             ?.let { absUrl(it) }
 
     private fun Element.imageUrl(): String? {
-        val raw = listOf("data-src", "data-original", "src")
-            .map { attr(it).trim() }.firstOrNull { it.isNotEmpty() } ?: return null
-        return absUrl(raw)
+        // Prefer eager lazy-load attributes, then src; skip inline `data:`
+        // placeholders the theme uses before its lazy loader swaps in the real
+        // URL. Fall back to the first candidate in srcset.
+        listOf("data-src", "data-original", "data-lazy-src", "src").forEach { attr ->
+            val value = attr(attr).trim()
+            if (value.isNotEmpty() && !value.startsWith("data:")) return absUrl(value)
+        }
+        return attr("srcset").trim().substringBefore(" ").takeIf { it.isNotEmpty() }
+            ?.let { absUrl(it) }
     }
 
     /** Maps a status word found anywhere in [text] to a [NovelStatus], or null. */
