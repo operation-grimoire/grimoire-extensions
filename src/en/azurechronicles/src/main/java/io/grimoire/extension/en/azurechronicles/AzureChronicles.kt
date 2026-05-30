@@ -1,5 +1,6 @@
 package io.grimoire.extension.en.azurechronicles
 
+import android.webkit.CookieManager
 import io.grimoire.api.model.Chapter
 import io.grimoire.api.model.Filter
 import io.grimoire.api.model.Novel
@@ -8,6 +9,11 @@ import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
 import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.SourceInfo
+import io.grimoire.api.source.WebViewLoginSource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
@@ -33,6 +39,12 @@ import java.io.IOException
  * The site sets cosmetic "soft protection" (disabled selection/right-click) and
  * has a coin-based unlock system for premium chapters; locked chapters render
  * an unlock prompt instead of prose, which [pageListParse] reports as an error.
+ * Login is delegated to a WebView ([WebViewLoginSource]) — signing in lets the
+ * session cookies replay on chapter requests so unlocked premium chapters read.
+ *
+ * Advanced filtering uses the theme's `ac_archive_filter_novels` admin-ajax
+ * endpoint (status / translator / sort / genre[] / tag[]); its taxonomy and the
+ * required ajax nonce are scraped from the archive page on first filter open.
  */
 @SourceInfo(
     id = 10L,
@@ -41,12 +53,21 @@ import java.io.IOException
     baseUrl = "https://azurechronicles.com",
     versionCode = 1,
 )
-class AzureChronicles : HttpSource() {
+class AzureChronicles : HttpSource(), WebViewLoginSource {
 
     override val id = 10L
     override val name = "Azure Chronicles"
     override val lang = "en"
     override val baseUrl = "https://azurechronicles.com"
+
+    // The ajax nonce required by ac_archive_filter_novels and the dynamic filter
+    // taxonomy, both scraped from the archive page on first filter-sheet open.
+    @Volatile
+    private var nonce: String? = null
+
+    @Volatile
+    private var cachedFilters: List<Filter<*>> = emptyList()
+    private val filterMutex = Mutex()
 
     // --- Listings -------------------------------------------------------------
 
@@ -60,13 +81,14 @@ class AzureChronicles : HttpSource() {
         if (page <= 1) GET("$baseUrl/type/novel/") else GET("$baseUrl/type/novel/page/$page/")
 
     override suspend fun popularNovelsParse(response: Response): List<Novel> =
-        parseListing(response)
+        parseCards(response.asJsoup())
 
     override suspend fun latestUpdatesParse(response: Response): List<Novel> =
-        parseListing(response)
+        parseCards(response.asJsoup())
 
-    private fun parseListing(response: Response): List<Novel> {
-        val doc = response.asJsoup()
+    // Card markup is shared by the archive page and the filter endpoint's
+    // `data.html` fragment, so both feed through here.
+    private fun parseCards(doc: Document): List<Novel> {
         return doc.select("article.ac-grid2-card").mapNotNull { card ->
             val link = card.selectFirst("a.ac-grid2-cover-link, a[href*=/novel/]")
                 ?: return@mapNotNull null
@@ -85,24 +107,64 @@ class AzureChronicles : HttpSource() {
         }.distinctBy { it.url }
     }
 
-    // Search is the theme's admin-ajax endpoint; it answers with
-    // `{ success, data: [{ id, title, url, cover, status, genres }] }`.
+    // A plain query (no active filters) uses the simple, nonce-free
+    // `ac_search_series` endpoint. As soon as any filter is set, the request
+    // switches to `ac_archive_filter_novels`, which supports status / translator
+    // / sort / genre[] / tag[] but requires the ajax nonce. Both return a single
+    // un-paginated result set, so [PAGE_MARKER] lets the parser stop after page 1.
     override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
-        val url = "$baseUrl/wp-admin/admin-ajax.php".toHttpUrlOrNull()!!.newBuilder()
-            .addQueryParameter("action", "ac_search_series")
-            .addQueryParameter("q", query.trim())
-            // ac_search_series returns one un-paginated result set; carry the
-            // requested page so the parser can end pagination after page 1.
+        val q = query.trim()
+        if (filters.none(::isFilterActive)) {
+            if (q.isEmpty()) return browseRequest(page)
+            val url = adminAjax()
+                .addQueryParameter("action", "ac_search_series")
+                .addQueryParameter("q", q)
+                .addQueryParameter(PAGE_MARKER, page.toString())
+                .build()
+            return GET(url.toString())
+        }
+        val b = adminAjax()
+            .addQueryParameter("action", "ac_archive_filter_novels")
+            .addQueryParameter("nonce", ensureNonce())
+            .addQueryParameter("type", "novel")
+            .addQueryParameter("q", q)
             .addQueryParameter(PAGE_MARKER, page.toString())
-            .build()
-        return GET(url.toString())
+        for (filter in filters) when (filter) {
+            is SelectFilter -> filter.slugs.getOrNull(filter.state)
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { b.addQueryParameter(filter.param, it) }
+            is CheckGroupFilter -> for (cb in filter.state) {
+                if (cb.state) filter.slugByLabel[cb.name]?.let { b.addQueryParameter(filter.param, it) }
+            }
+            else -> Unit
+        }
+        return GET(b.build().toString())
     }
 
     override suspend fun searchNovelsParse(response: Response): List<Novel> {
-        if (response.request.url.queryParameter(PAGE_MARKER).let { it != null && it != "1" }) {
-            return emptyList()
+        val url = response.request.url
+        if (url.queryParameter(PAGE_MARKER).let { it != null && it != "1" }) return emptyList()
+        val raw = response.body?.string().orEmpty()
+        return when {
+            // Filter endpoint: cards live in the JSON's data.html fragment. A
+            // rejected/expired nonce answers "-1" (or 403) rather than JSON —
+            // this happens for anonymous sessions, so degrade to no results
+            // instead of crashing. Sign in (the nonce becomes valid) to filter.
+            "ac_archive_filter_novels" in url.toString() -> {
+                val json = runCatching { JSONObject(raw.ifBlank { "{}" }) }.getOrNull()
+                    ?: return emptyList()
+                val html = json.optJSONObject("data")?.optString("html").orEmpty()
+                parseCards(Jsoup.parse(html, baseUrl))
+            }
+            // Keyword search: a flat JSON array of series objects.
+            "ac_search_series" in url.toString() -> parseSearchJson(raw)
+            // Fallback: a browse listing page (blank query, no filters).
+            else -> parseCards(Jsoup.parse(raw, url.toString()))
         }
-        val json = JSONObject(response.body?.string().orEmpty().ifBlank { "{}" })
+    }
+
+    private fun parseSearchJson(raw: String): List<Novel> {
+        val json = runCatching { JSONObject(raw.ifBlank { "{}" }) }.getOrNull() ?: return emptyList()
         val data = json.optJSONArray("data") ?: return emptyList()
         return (0 until data.length()).mapNotNull { i ->
             val item = data.optJSONObject(i) ?: return@mapNotNull null
@@ -121,7 +183,74 @@ class AzureChronicles : HttpSource() {
         }
     }
 
-    override fun getFilterList(): List<Filter<*>> = emptyList()
+    // --- Dynamic filters ------------------------------------------------------
+
+    override val hasDynamicFilters: Boolean = true
+
+    override fun getFilterList(): List<Filter<*>> = cachedFilters.ifEmpty {
+        listOf(Filter.Header("Open filters to load genres, tags, translators and sorting."))
+    }
+
+    // Double-checked lock: a burst of filter-sheet opens hits the network once.
+    // Caches both the filter taxonomy and the ajax nonce from the archive page.
+    override suspend fun fetchFilterOptions(): List<Filter<*>> = withContext(Dispatchers.IO) {
+        if (cachedFilters.isEmpty()) {
+            filterMutex.withLock {
+                if (cachedFilters.isEmpty()) {
+                    runCatching {
+                        val html = client.newCall(GET("$baseUrl/type/novel/"))
+                            .execute().use { it.body?.string().orEmpty() }
+                        extractNonce(html)?.let { nonce = it }
+                        cachedFilters = buildFilters(Jsoup.parse(html, baseUrl))
+                    }
+                }
+            }
+        }
+        getFilterList()
+    }
+
+    private fun buildFilters(doc: Document): List<Filter<*>> = buildList {
+        fun options(id: String) = doc.select("#$id option")
+            .map { it.attr("value").trim() to it.text().trim() }
+        options("ac-archive-filter-sort").takeIf { it.size > 1 }?.let {
+            add(SelectFilter("Sort by", "sort", it.map { o -> o.first }, it.map { o -> o.second }))
+        }
+        options("ac-archive-filter-status").takeIf { it.size > 1 }?.let {
+            add(SelectFilter("Status", "status", it.map { o -> o.first }, it.map { o -> o.second }))
+        }
+        options("ac-archive-filter-translator").takeIf { it.size > 1 }?.let {
+            add(SelectFilter("Translator", "translator", it.map { o -> o.first }, it.map { o -> o.second }))
+        }
+        options("ac-archive-filter-genre").filter { it.first.isNotEmpty() }.takeIf { it.isNotEmpty() }
+            ?.let { add(CheckGroupFilter("Genres", "genre[]", it)) }
+        options("ac-archive-filter-tag").filter { it.first.isNotEmpty() }.takeIf { it.isNotEmpty() }
+            ?.let { tags -> add(CheckGroupFilter("Tags", "tag[]", tags.map { it.first to it.second.removePrefix("#") })) }
+    }
+
+    private fun isFilterActive(filter: Filter<*>): Boolean = when (filter) {
+        is SelectFilter -> filter.state > 0
+        is CheckGroupFilter -> filter.state.any { it.state }
+        else -> false
+    }
+
+    /** A single-choice filter backed by a query parameter; index 0 is the
+     *  "all/default" option whose value is blank and therefore skipped. */
+    private class SelectFilter(
+        name: String,
+        val param: String,
+        val slugs: List<String>,
+        labels: List<String>,
+    ) : Filter.Select<String>(name, labels.toTypedArray())
+
+    /** A multi-select group emitting one `param` entry per checked box;
+     *  CheckBox is final in the API, so the slug is recovered from the label. */
+    private class CheckGroupFilter(
+        name: String,
+        val param: String,
+        items: List<Pair<String, String>>,
+    ) : Filter.Group<Filter.CheckBox>(name, items.map { Filter.CheckBox(it.second) }) {
+        val slugByLabel: Map<String, String> = items.associate { it.second to it.first }
+    }
 
     // --- Novel details --------------------------------------------------------
 
@@ -206,7 +335,50 @@ class AzureChronicles : HttpSource() {
         }
     }
 
+    // --- WebViewLoginSource ---------------------------------------------------
+
+    // Azure Chronicles is WordPress; /login/ is a normal email/password (+Google)
+    // page, and a successful sign-in redirects back to the site. The WebView's
+    // cookie jar then carries the WP session onto chapter requests so unlocked
+    // premium chapters render.
+    override val loginUrl: String = "$baseUrl/login/"
+    override val loginSuccessUrl: String = baseUrl
+
+    // WordPress sets a `wordpress_logged_in_<hash>` cookie when authenticated.
+    override suspend fun isLoggedIn(): Boolean = withContext(Dispatchers.IO) {
+        CookieManager.getInstance().getCookie(baseUrl).orEmpty()
+            .split(';').map { it.trim() }
+            .any { it.startsWith("wordpress_logged_in", ignoreCase = true) }
+    }
+
+    override suspend fun logout(): Unit = withContext(Dispatchers.IO) {
+        val cm = CookieManager.getInstance()
+        cm.getCookie(baseUrl).orEmpty()
+            .split(';').map { it.substringBefore('=').trim() }.filter { it.isNotEmpty() }
+            .forEach { cm.setCookie(baseUrl, "$it=; Max-Age=0; Path=/") }
+        cm.flush()
+    }
+
     // --- Helpers --------------------------------------------------------------
+
+    private fun adminAjax() = "$baseUrl/wp-admin/admin-ajax.php".toHttpUrlOrNull()!!.newBuilder()
+
+    // The filter endpoint rejects a missing/blank nonce (HTTP 403). The nonce is
+    // normally cached by fetchFilterOptions before any filtered search; this is
+    // the fallback when a filtered request arrives without it.
+    private fun ensureNonce(): String {
+        nonce?.let { return it }
+        val fetched = runCatching {
+            client.newCall(GET("$baseUrl/type/novel/")).execute()
+                .use { extractNonce(it.body?.string().orEmpty()) }
+        }.getOrNull()
+        if (fetched != null) nonce = fetched
+        return fetched.orEmpty()
+    }
+
+    private fun extractNonce(html: String): String? =
+        Regex("""nonce:\s*'([^']+)'""").find(html)?.groupValues?.get(1)
+            ?.takeIf { it.isNotEmpty() }
 
     private fun absUrl(href: String): String = when {
         href.startsWith("http") -> href
