@@ -1,5 +1,6 @@
 package io.grimoire.extension.en.zlibrary
 
+import android.webkit.CookieManager
 import io.grimoire.api.model.Chapter
 import io.grimoire.api.model.Filter
 import io.grimoire.api.model.Novel
@@ -12,9 +13,9 @@ import io.grimoire.api.source.EpubSource
 import io.grimoire.api.source.MultiLanguageSource
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.source.SourcePreference
+import io.grimoire.api.source.WebViewLoginSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
@@ -38,9 +39,11 @@ import java.io.IOException
  * bytes via [getEpub] and parses them locally; [chapterListParse] /
  * [pageListParse] are intentionally empty.
  *
- * Downloads work anonymously within Z-Library's daily quota; optional account
- * credentials ([ConfigurableSource]) raise/remove that limit. Cloudflare is
- * handled transparently by the default OkHttp client.
+ * Downloads work anonymously within Z-Library's daily quota; signing in raises
+ * or removes that limit. Login is delegated to a WebView ([WebViewLoginSource]):
+ * the host opens [loginUrl], the user signs in on Z-Library's own page (which
+ * also clears Cloudflare), and the resulting session cookies are replayed on
+ * this source's OkHttp requests — no credentials are stored by the extension.
  *
  * Note: Z-Library rotates mirror domains and tweaks its markup, so the host is
  * a user-editable preference, and shelf/search parsing, download-link
@@ -52,9 +55,10 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.im",
-    versionCode = 21,
+    versionCode = 22,
 )
-class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource {
+class ZLibrary :
+    HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource, WebViewLoginSource {
 
     override val id = 6L
     override val name = "Z-Library"
@@ -67,17 +71,6 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
     @Volatile
     private var mirror: String = defaultMirror
 
-    @Volatile
-    private var email: String = ""
-
-    @Volatile
-    private var password: String = ""
-
-    // Z-Library uses a single-login that issues per-host session cookies, and
-    // the download host (the per-user mirror in a book's URL) differs from the
-    // landing domain, so login state is tracked per host.
-    private val loggedInHosts = java.util.Collections.synchronizedSet(HashSet<String>())
-
     // Lowercased enabled content languages. Empty = no filter. Z-Library's
     // search API ignores any language parameter (verified), so this is applied
     // client-side by dropping non-matching results.
@@ -87,20 +80,9 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
     override val baseUrl: String
         get() = mirror
 
-    // --- ConfigurableSource ---------------------------------------------------
+    // --- ConfigurableSource (mirror domain only — login is via WebView) -------
 
     override fun getPreferences(): List<SourcePreference> = listOf(
-        SourcePreference.EditText(
-            key = PREF_EMAIL,
-            title = "Email",
-            summary = "Z-Library account email (optional — raises the daily download limit)",
-        ),
-        SourcePreference.EditText(
-            key = PREF_PASSWORD,
-            title = "Password",
-            summary = "Z-Library account password",
-            isPassword = true,
-        ),
         SourcePreference.EditText(
             key = PREF_BASE_URL,
             title = "Mirror domain",
@@ -112,20 +94,65 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
     )
 
     override fun setPreferences(values: Map<String, String>) {
-        val newEmail = values[PREF_EMAIL].orEmpty().trim()
-        val newPassword = values[PREF_PASSWORD].orEmpty()
-        val newMirror = values[PREF_BASE_URL]
+        mirror = values[PREF_BASE_URL]
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?.let { normalizeBaseUrl(it) }
             ?: defaultMirror
-        // A credential or host change invalidates per-host session state.
-        if (newEmail != email || newPassword != password || newMirror != mirror) {
-            loggedInHosts.clear()
+    }
+
+    override suspend fun validateConfiguration(): ConfigValidationResult =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                client.newCall(GET(baseUrl)).execute().use { it.isSuccessful }
+            }.getOrDefault(false).let { ok ->
+                if (ok) {
+                    ConfigValidationResult(true, "Reached Z-Library at $baseUrl.")
+                } else {
+                    ConfigValidationResult(
+                        false,
+                        "Couldn't reach $baseUrl — check the mirror domain.",
+                    )
+                }
+            }
         }
-        email = newEmail
-        password = newPassword
-        mirror = newMirror
+
+    // --- WebViewLoginSource ---------------------------------------------------
+
+    // Z-Library's sign-in page; loading it in a WebView also clears Cloudflare.
+    // Both track the configured mirror so a changed host still logs in/downloads
+    // against the same domain.
+    override val loginUrl: String
+        get() = "$baseUrl/login"
+
+    // A successful sign-in redirects off /login back to the homepage.
+    override val loginSuccessUrl: String
+        get() = baseUrl
+
+    // Z-Library issues `remix_userid` (+ `remix_userkey`) cookies on sign-in;
+    // a logged-out jar has neither (or `remix_userid=0`).
+    override suspend fun isLoggedIn(): Boolean = withContext(Dispatchers.IO) {
+        val raw = CookieManager.getInstance().getCookie(baseUrl).orEmpty()
+        val userId = cookieValue(raw, "remix_userid")
+        (!userId.isNullOrBlank() && userId != "0") ||
+            !cookieValue(raw, "remix_userkey").isNullOrBlank()
+    }
+
+    override suspend fun logout(): Unit = withContext(Dispatchers.IO) {
+        val cm = CookieManager.getInstance()
+        val host = baseUrl.toHttpUrlOrNull()?.host
+        val scopes = buildList {
+            add(baseUrl)
+            host?.let { add("https://$it"); add("https://www.$it") }
+        }.distinct()
+        // Expire every cookie currently set on the mirror — the session cookie
+        // name varies by deployment, so clearing all of them is the safe option.
+        val names = cm.getCookie(baseUrl).orEmpty()
+            .split(';').map { it.substringBefore('=').trim() }.filter { it.isNotEmpty() }
+        for (name in names) for (scope in scopes) {
+            cm.setCookie(scope, "$name=; Max-Age=0; Path=/")
+        }
+        cm.flush()
     }
 
     // --- MultiLanguageSource --------------------------------------------------
@@ -313,17 +340,11 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
 
     override suspend fun getEpub(novel: Novel): ByteArray = withContext(Dispatchers.IO) {
         val bookUrl = resolveUrl(novel.url)
-        val host = bookUrl.toHttpUrlOrNull()?.host
-            ?: throw IOException("Z-Library: invalid book URL")
-        // Authenticate on the download host before fetching the (logged-in)
-        // book page so the page exposes the real download link and the cookie
-        // jar carries the session to the /dl request.
-        ensureLoggedIn(host)
-
-        // The book lives on Z-Library's per-user mirror, which is Cloudflare
-        // gated. The default client solves the challenge transparently, but
-        // clearance is cookie-based and can need a follow-up request to land,
-        // so retry a few times before giving up.
+        // The session is carried by the WebView's cookie jar (see
+        // [WebViewLoginSource]); requests here ride those cookies automatically.
+        // The book page is Cloudflare gated; the default client solves the
+        // challenge transparently, but clearance is cookie-based and can need a
+        // follow-up request to land, so retry a few times before giving up.
         val bookHtml = fetchWithRetry(bookUrl)
             ?: throw IOException(
                 "Z-Library: couldn't load the book page — Cloudflare protection " +
@@ -331,8 +352,8 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
             )
         val downloadHref = resolveDownloadHref(Jsoup.parse(bookHtml, bookUrl))
             ?: throw IOException(
-                "Z-Library: no EPUB download link found. Sign in via Source " +
-                    "settings, or the daily download limit may have been reached.",
+                "Z-Library: no EPUB download link found. Sign in via the source's " +
+                    "account login, or the daily download limit may have been reached.",
             )
 
         // Download links are relative to the book's own mirror host (the
@@ -413,8 +434,8 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
                     pageTitle.contains("reader", ignoreCase = true)
                 return when {
                     QUOTA_MARKERS.any { lower.contains(it) } -> DlResult.Fatal(
-                        "the daily download limit has been reached — add a " +
-                            "Z-Library account in Source settings to raise it",
+                        "the daily download limit has been reached — sign in via " +
+                            "the source's account login to raise it",
                     )
                     isReader -> DlResult.Fatal(
                         "Z-Library returned its online reader instead of the file. " +
@@ -422,13 +443,9 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
                             "established — open the source once via “Open in " +
                             "WebView” to warm it up, then retry the download",
                     )
-                    email.isEmpty() && LOGIN_MARKERS.any { lower.contains(it) } -> DlResult.Fatal(
-                        "this book requires a signed-in account — add your " +
-                            "Z-Library credentials in Source settings",
-                    )
                     LOGIN_MARKERS.any { lower.contains(it) } -> DlResult.Fatal(
-                        "the account session was not accepted — re-check the " +
-                            "email/password in Source settings$title",
+                        "this book requires a signed-in account — sign in via the " +
+                            "source's account login$title",
                     )
                     else -> DlResult.Retry(
                         "the server returned a web page, not a file$title",
@@ -496,100 +513,14 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
             ?.attr("href")?.trim()?.takeIf { it.isNotEmpty() }
     }
 
-    // --- Optional account login ----------------------------------------------
-
-    /**
-     * Logs the account in on [host] (the host that will serve the download).
-     * Z-Library's single sign-on form posts to `/login` with
-     * `site_mode=books&action=login` and issues `remix_userid`/`remix_userkey`
-     * cookies scoped to that host, so logging in on the landing domain does
-     * not authorise downloads on a per-user mirror. No-op when no credentials
-     * are configured (anonymous, quota-limited). Throws on an explicit
-     * credential rejection so a bad password is reported clearly rather than
-     * surfacing later as the online-reader redirect.
-     */
-    private fun ensureLoggedIn(host: String) {
-        if (email.isEmpty() || password.isEmpty()) return
-        if (loggedInHosts.contains(host)) return
-        synchronized(loggedInHosts) {
-            if (loggedInHosts.contains(host)) return
-            val error = performLogin(host)
-            if (error != null) throw IOException("Z-Library: $error")
-            loggedInHosts.add(host)
-        }
-    }
-
-    /**
-     * Performs the single sign-on POST against [host]. Returns `null` on
-     * success or a short failure message.
-     *
-     * A wrong-credentials POST bounces back to the SSO page (still on
-     * `/login`, body titled "Z-Library single sign on"); a success redirects
-     * away from `/login`. Z-Library embeds a login modal site-wide and the
-     * session cookie name varies by deployment, so we key off the
-     * stayed-on-/login signal rather than a specific cookie.
-     */
-    private fun performLogin(host: String): String? {
-        val body = FormBody.Builder()
-            .add("email", email)
-            .add("password", password)
-            .add("site_mode", "books")
-            .add("action", "login")
-            .add("redirectUrl", "")
-            .build()
-        val request = Request.Builder()
-            .url("https://$host/login")
-            .header("Referer", "https://$host/login")
-            .header("Origin", "https://$host")
-            .post(body)
-            .build()
-        val (finalUrl, payload) = runCatching {
-            client.newCall(request).execute().use { resp ->
-                resp.request.url.toString() to resp.body?.string().orEmpty()
-            }
-        }.getOrElse {
-            return "couldn't reach Z-Library to sign in (${it.message ?: "network error"})"
-        }
-        val stayedOnLogin = finalUrl.substringBefore('?').trimEnd('/').endsWith("/login")
-        val ssoPage = payload.contains("single sign on", ignoreCase = true) ||
-            payload.contains("single sign-on", ignoreCase = true)
-        val rejected = payload.contains("incorrect", ignoreCase = true) ||
-            payload.contains("wrong email or password", ignoreCase = true) ||
-            payload.contains("user not found", ignoreCase = true)
-        return if (rejected || (stayedOnLogin && ssoPage)) {
-            "sign-in failed — check the email/password in Source settings"
-        } else {
-            null
-        }
-    }
-
-    override suspend fun validateConfiguration(): ConfigValidationResult =
-        withContext(Dispatchers.IO) {
-            if (email.isEmpty() && password.isEmpty()) {
-                return@withContext ConfigValidationResult(
-                    success = true,
-                    message = "No account set — downloads use Z-Library's anonymous " +
-                        "daily limit. Add an email/password to raise it.",
-                )
-            }
-            if (email.isEmpty() || password.isEmpty()) {
-                return@withContext ConfigValidationResult(
-                    success = false,
-                    message = "Enter both an email and a password.",
-                )
-            }
-            val host = baseUrl.toHttpUrlOrNull()?.host ?: "z-library.im"
-            loggedInHosts.remove(host)
-            when (val error = performLogin(host)) {
-                null -> {
-                    loggedInHosts.add(host)
-                    ConfigValidationResult(true, "Signed in to Z-Library successfully.")
-                }
-                else -> ConfigValidationResult(false, error.replaceFirstChar { it.uppercase() })
-            }
-        }
-
     // --- Helpers --------------------------------------------------------------
+
+    private fun cookieValue(rawCookies: String, name: String): String? =
+        rawCookies.split(';')
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("$name=") }
+            ?.substringAfter('=')
+            ?.takeIf { it.isNotEmpty() }
 
     // Resolve a (possibly lazy/relative) image URL. Homepage shelf covers are
     // root-relative (/covers150/...) but live on the book's mirror host, not
@@ -636,8 +567,6 @@ class ZLibrary : HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSour
     }
 
     companion object {
-        private const val PREF_EMAIL = "email"
-        private const val PREF_PASSWORD = "password"
         private const val PREF_BASE_URL = "base_url"
         private const val PAGE_MARKER = "zlpage"
         private const val MAX_RETRIES = 3
