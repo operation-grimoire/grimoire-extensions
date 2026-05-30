@@ -31,7 +31,7 @@ import java.io.IOException
  * only format the host app reads here): non-EPUB rows are skipped.
  *
  * Targets the mainline LibGen fork served identically from several mirror hosts
- * (`libgen.la`, `libgen.vg`, `libgen.bz`, `libgen.gl`). On that fork:
+ * (`libgen.la`, `libgen.vg`, `libgen.bz`, `libgen.gl`, `libgen.li`). On that fork:
  * `GET /index.php?req=…` returns a results `<table>`, `GET /edition.php?id=…` is
  * the detail page, and the download is a two-hop chain — `GET /ads.php?md5=…`
  * renders a gateway page carrying a keyed `get.php?md5=…&key=…` link that serves
@@ -110,8 +110,8 @@ class LibGen :
             key = PREF_BASE_URL,
             title = "Mirror domain",
             summary = "Optional LibGen host to try first (default libgen.la, with " +
-                "libgen.vg / .bz / .gl as automatic backups). Set this only if you " +
-                "want to force a specific or newer mirror.",
+                "libgen.vg / .bz / .gl / .li as automatic backups). Set this only if " +
+                "you want to force a specific or newer mirror.",
             default = "",
         ),
     )
@@ -302,22 +302,37 @@ class LibGen :
             ?: Regex("md5=([0-9a-fA-F]+)").find(novel.url)?.groupValues?.get(1)
             ?: throw IOException("LibGen: couldn't find the book id in its URL.")
         var lastError = "unknown error"
+        // The interceptor can't fail the download over (the get.php key is bound
+        // to the host that issued it), so run the whole ads.php -> get.php chain
+        // per host instead, active host first, until one serves the file.
+        val ordered = (listOf(activeHost) + hosts).distinct()
+        for (host in ordered) {
+            val bytes = runCatching { downloadEpub(host, md5) { lastError = it } }
+                .getOrElse { lastError = it.message ?: "network error"; null }
+            if (bytes != null) return@withContext bytes
+        }
+        throw IOException("LibGen: $lastError.")
+    }
+
+    // Runs the two-hop download against one specific host, retrying transient
+    // failures. Returns the EPUB bytes or null (reporting the reason via [onError]).
+    private fun downloadEpub(host: String, md5: String, onError: (String) -> Unit): ByteArray? {
         repeat(MAX_RETRIES) { attempt ->
             val bytes = runCatching {
                 // 1) The gateway page carries a keyed get.php link to the file.
-                val getHref = client.newCall(GET("$baseUrl/ads.php?md5=$md5")).execute().use { resp ->
+                val getHref = client.newCall(GET("$host/ads.php?md5=$md5")).execute().use { resp ->
                     if (!resp.isSuccessful) {
-                        lastError = "gateway returned HTTP ${resp.code}"
+                        onError("gateway returned HTTP ${resp.code}")
                         return@use null
                     }
                     Jsoup.parse(resp.body!!.string(), resp.request.url.toString())
                         .selectFirst("a[href*=get.php]")?.attr("href")?.trim()
                 } ?: run {
-                    if (lastError == "unknown error") lastError = "no download link on the gateway page"
+                    onError("no download link on the gateway page")
                     return@runCatching null
                 }
-                // 2) Fetch the actual file (OkHttp follows any CDN redirect).
-                val fileUrl = resolveAgainst("$baseUrl/ads.php", getHref)
+                // 2) Fetch the actual file on the same host (the key is host-bound).
+                val fileUrl = resolveAgainst("$host/ads.php", getHref)
                 client.newCall(GET(fileUrl)).execute().use { resp ->
                     val ct = resp.header("Content-Type").orEmpty().lowercase()
                     val cd = resp.header("Content-Disposition").orEmpty()
@@ -329,22 +344,21 @@ class LibGen :
                     if (resp.isSuccessful && isFile) {
                         resp.body?.bytes()?.takeIf { it.isNotEmpty() }
                     } else {
-                        lastError = if (!resp.isSuccessful) {
-                            "download failed (HTTP ${resp.code})"
-                        } else {
-                            "the server returned a web page, not a file"
-                        }
+                        onError(
+                            if (!resp.isSuccessful) "download failed (HTTP ${resp.code})"
+                            else "the server returned a web page, not a file",
+                        )
                         null
                     }
                 }
             }.getOrElse {
-                lastError = it.message ?: "network error"
+                onError(it.message ?: "network error")
                 null
             }
-            if (bytes != null) return@withContext bytes
+            if (bytes != null) return bytes
             if (attempt < MAX_RETRIES - 1) Thread.sleep(1500L * (attempt + 1))
         }
-        throw IOException("LibGen: $lastError.")
+        return null
     }
 
     // --- Host failover --------------------------------------------------------
@@ -445,6 +459,7 @@ class LibGen :
             "https://libgen.vg",
             "https://libgen.bz",
             "https://libgen.gl",
+            "https://libgen.li",
         )
     }
 }
