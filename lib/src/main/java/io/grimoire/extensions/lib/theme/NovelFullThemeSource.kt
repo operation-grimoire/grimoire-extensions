@@ -85,7 +85,11 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
             ?: element.selectFirst("a")!!.attr("title"),
     )
 
-    override fun pageListSelector() = "#chapter-content p"
+    // Drop empty `<p></p>` spacers the theme sprinkles into #chapter-content:
+    // they carry no text and no image, so they'd otherwise surface as blank
+    // reader pages. Keep any paragraph with visible text OR an image.
+    override fun pageListSelector() =
+        "#chapter-content p:matches(\\S), #chapter-content p:has(img)"
 
     // Light-novel titles embed illustrations as <p><img> in #chapter-content;
     // emit them as image pages instead of dropping them via .text(). Plain web
@@ -113,7 +117,22 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
 
     override suspend fun getChapterList(novel: Novel, page: Int): List<Chapter> =
         withContext(Dispatchers.IO) {
-            chapterListParse(client.newCall(GET("${resolveUrl(novel.url)}?page=$page")).execute())
+            val body = client.newCall(GET("${resolveUrl(novel.url)}?page=$page"))
+                .execute().use { it.body?.string().orEmpty() }
+            val doc = Jsoup.parse(body, baseUrl)
+            // NovelFull clamps an out-of-range ?page to the last page and
+            // re-serves it (the mobile pagination can even advertise a "next"
+            // past the end). A naive page-walk then appends the final chapters
+            // twice, and duplicate chapter urls become duplicate Compose keys
+            // that crash the reader list. The pagination's active item reflects
+            // the page actually served, so if it differs from the page we asked
+            // for we've run past the end — return empty to stop the walk.
+            val active = doc.selectFirst("ul.pagination li.active a")
+                ?.text()?.trim()?.toIntOrNull()
+            if (page > 1 && active != null && active != page) {
+                return@withContext emptyList()
+            }
+            doc.select(chapterListSelector()).map { chapterFromElement(it) }
         }
 
     private var loadedGenres: List<String> = emptyList()
