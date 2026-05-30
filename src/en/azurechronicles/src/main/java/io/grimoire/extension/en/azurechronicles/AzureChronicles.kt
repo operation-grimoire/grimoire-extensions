@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Azure Chronicles",
     lang = "en",
     baseUrl = "https://azurechronicles.com",
-    versionCode = 3,
+    versionCode = 4,
 )
 class AzureChronicles : HttpSource(), WebViewLoginSource {
 
@@ -105,11 +105,7 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
             Novel(
                 url = absUrl(href),
                 title = title,
-                // Cover is an <img> (trending), a background-image on the link
-                // itself (latest), or on a child wrapper (archive grid cards).
-                thumbnailUrl = link.selectFirst("img")?.imageUrl()
-                    ?: bgImage(link)
-                    ?: link.selectFirst("[style*=background-image]")?.let { bgImage(it) },
+                thumbnailUrl = coverUrl(link),
             )
         }.distinctBy { it.url }
 
@@ -442,6 +438,31 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
         href.startsWith("//") -> "https:$href"
         href.startsWith("/") -> "$baseUrl$href"
         else -> "$baseUrl/$href"
+    }
+
+    /**
+     * Best-effort cover URL for a card link. The site (or a WP lazy-load layer)
+     * varies the cover host wildly: a plain `<img>` (search/latest), a
+     * background-image on the link or a child wrapper (archive grid), and
+     * sometimes a lazy variant where the `<img src>`/style is blanked and the
+     * real URL hides in a `data-*` attribute. Try all of them so covers resolve
+     * regardless of which shape the served HTML used.
+     */
+    private fun coverUrl(link: Element): String? {
+        link.selectFirst("img")?.imageUrl()?.let { return it }
+        (sequenceOf(link) + link.select("[style*=background-image]").asSequence())
+            .firstNotNullOfOrNull { bgImage(it) }?.let { return it }
+        // Lazy background-image: the real URL sits bare in a data-* attribute.
+        val lazyBg = listOf("data-bg", "data-background", "data-bg-image", "data-lazy-bg", "data-src")
+        (sequenceOf(link) + link.allElements.asSequence()).forEach { el ->
+            lazyBg.forEach { name ->
+                val v = el.attr(name).trim()
+                if ((v.startsWith("http") || v.startsWith("/")) && !v.startsWith("data:")) {
+                    return absUrl(v)
+                }
+            }
+        }
+        return null
     }
 
     /** Pulls the URL out of an inline `background-image:url('…')` style. */
