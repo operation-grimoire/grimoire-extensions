@@ -55,7 +55,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.im",
-    versionCode = 22,
+    versionCode = 23,
 )
 class ZLibrary :
     HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource, WebViewLoginSource {
@@ -145,12 +145,27 @@ class ZLibrary :
             add(baseUrl)
             host?.let { add("https://$it"); add("https://www.$it") }
         }.distinct()
+        // Domain attributes to expire against. Z-Library's auth cookies are
+        // domain cookies (Domain=.z-library.im); a host-only expiry cookie does
+        // NOT override a domain cookie, so each name must also be expired with
+        // the matching Domain or the login survives logout.
+        val domains = buildList {
+            host?.let {
+                add(it); add(".$it")
+                val parts = it.split('.')
+                if (parts.size > 2) {
+                    val parent = parts.drop(1).joinToString(".")
+                    add(parent); add(".$parent")
+                }
+            }
+        }.distinct()
         // Expire every cookie currently set on the mirror — the session cookie
         // name varies by deployment, so clearing all of them is the safe option.
         val names = cm.getCookie(baseUrl).orEmpty()
             .split(';').map { it.substringBefore('=').trim() }.filter { it.isNotEmpty() }
         for (name in names) for (scope in scopes) {
-            cm.setCookie(scope, "$name=; Max-Age=0; Path=/")
+            cm.setCookie(scope, "$name=; $COOKIE_EXPIRY")
+            for (domain in domains) cm.setCookie(scope, "$name=; Domain=$domain; $COOKIE_EXPIRY")
         }
         cm.flush()
     }
@@ -569,6 +584,8 @@ class ZLibrary :
     companion object {
         private const val PREF_BASE_URL = "base_url"
         private const val PAGE_MARKER = "zlpage"
+        private const val COOKIE_EXPIRY =
+            "Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/"
         private const val MAX_RETRIES = 3
         private const val MAX_HOPS = 4
 

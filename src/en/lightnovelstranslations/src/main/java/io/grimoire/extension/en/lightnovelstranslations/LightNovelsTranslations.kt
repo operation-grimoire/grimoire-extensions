@@ -18,7 +18,7 @@ import java.net.URLEncoder
     name = "Light Novels Translations",
     lang = "en",
     baseUrl = "https://lightnovelstranslations.com",
-    versionCode = 5,
+    versionCode = 6,
 )
 class LightNovelsTranslations : ParsedHttpSource() {
 

@@ -42,7 +42,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 23,
+    versionCode = 24,
 )
 class WebNovel : HttpSource(), WebViewLoginSource {
 
@@ -91,15 +91,26 @@ class WebNovel : HttpSource(), WebViewLoginSource {
 
     override suspend fun logout(): Unit = withContext(Dispatchers.IO) {
         val cm = CookieManager.getInstance()
-        val raw = cm.getCookie(baseUrl).orEmpty()
-        raw.split(';')
+        // Collect cookie names across every host Webnovel sets them on — the
+        // session cookies (uid, _csrfToken, …) are spread over the passport and
+        // m. subdomains, not just baseUrl.
+        val names = COOKIE_DOMAINS
+            .flatMap { url -> cm.getCookie(url).orEmpty().split(';') }
             .map { it.substringBefore('=').trim() }
             .filter { it.isNotEmpty() }
-            .forEach { name ->
-                COOKIE_DOMAINS.forEach { domain ->
-                    cm.setCookie(domain, "$name=; Max-Age=0; Path=/")
+            .toSet()
+        // Webnovel's auth cookies are domain cookies (Domain=.webnovel.com). A
+        // host-only expiry cookie does NOT override a domain cookie, so each
+        // name must be expired both host-only and with the matching Domain
+        // attribute, or the login survives logout.
+        names.forEach { name ->
+            COOKIE_DOMAINS.forEach { url ->
+                cm.setCookie(url, "$name=; $COOKIE_EXPIRY")
+                COOKIE_PARENT_DOMAINS.forEach { domain ->
+                    cm.setCookie(url, "$name=; Domain=$domain; $COOKIE_EXPIRY")
                 }
             }
+        }
         cm.flush()
     }
 
@@ -836,5 +847,16 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             "https://m.webnovel.com",
             "https://passport.webnovel.com",
         )
+
+        // Domain attributes to expire each cookie against. Webnovel's auth
+        // cookies are registrable-domain cookies (Domain=.webnovel.com); the
+        // leading-dot and bare forms cover both how a browser may store them.
+        private val COOKIE_PARENT_DOMAINS = listOf(
+            ".webnovel.com",
+            "webnovel.com",
+        )
+
+        private const val COOKIE_EXPIRY =
+            "Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/"
     }
 }
