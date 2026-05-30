@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Azure Chronicles",
     lang = "en",
     baseUrl = "https://azurechronicles.com",
-    versionCode = 1,
+    versionCode = 2,
 )
 class AzureChronicles : HttpSource(), WebViewLoginSource {
 
@@ -71,13 +71,14 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
 
     // --- Listings -------------------------------------------------------------
 
-    // Popular is the homepage "Trending" rail (a single, un-paginated set).
-    override fun popularNovelsRequest(page: Int): Request = GET("$baseUrl/?$PAGE_MARKER=$page")
+    // Popular reads the /type/novel/ archive. (The homepage "Trending" rail
+    // would be the truer "popular", but it serves resized cover variants
+    // —`-400.webp`, doubled `.jpg.jpeg`— that the app's image loader fails to
+    // render; the archive cards expose the original covers, which display.)
+    override fun popularNovelsRequest(page: Int): Request = browseRequest(page)
 
-    override suspend fun popularNovelsParse(response: Response): List<Novel> {
-        if (otherPage(response)) return emptyList()
-        return parseCardLinks(response.asJsoup(), "article.ac-trending-card a.ac-tc-cover")
-    }
+    override suspend fun popularNovelsParse(response: Response): List<Novel> =
+        parseCards(response.asJsoup())
 
     // Latest is the dedicated /latest/ feed, paginated by /latest/page/N/.
     override fun latestUpdatesRequest(page: Int): Request =
@@ -115,9 +116,6 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
     // The /type/novel/ archive + filter endpoint use `article.ac-grid2-card`.
     private fun parseCards(doc: Document): List<Novel> =
         parseCardLinks(doc, "article.ac-grid2-card a.ac-grid2-cover-link, article.ac-grid2-card a[href*=/novel/]")
-
-    private fun otherPage(response: Response): Boolean =
-        response.request.url.queryParameter(PAGE_MARKER).let { it != null && it != "1" }
 
     // A plain query (no active filters) uses the simple, nonce-free
     // `ac_search_series` endpoint. As soon as any filter is set, the request
