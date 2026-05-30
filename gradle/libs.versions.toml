@@ -1,6 +1,6 @@
 [versions]
 agp = "9.2.1"
-extensionsApi = "0.4.0"
+extensionsApi = "0.5.0"
 junitJupiter = "5.10.2"
 junitPlatform = "1.10.2"
 
