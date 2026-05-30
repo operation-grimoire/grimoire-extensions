@@ -71,41 +71,53 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
 
     // --- Listings -------------------------------------------------------------
 
-    // The archive has no exposed sort, so popular and latest both read the
-    // `/type/novel/` listing (newest first), paginated by `/page/N/`.
-    override fun popularNovelsRequest(page: Int): Request = browseRequest(page)
+    // Popular is the homepage "Trending" rail (a single, un-paginated set).
+    override fun popularNovelsRequest(page: Int): Request = GET("$baseUrl/?$PAGE_MARKER=$page")
 
-    override fun latestUpdatesRequest(page: Int): Request = browseRequest(page)
+    override suspend fun popularNovelsParse(response: Response): List<Novel> {
+        if (otherPage(response)) return emptyList()
+        return parseCardLinks(response.asJsoup(), "article.ac-trending-card a.ac-tc-cover")
+    }
 
+    // Latest is the dedicated /latest/ feed, paginated by /latest/page/N/.
+    override fun latestUpdatesRequest(page: Int): Request =
+        if (page <= 1) GET("$baseUrl/latest/") else GET("$baseUrl/latest/page/$page/")
+
+    override suspend fun latestUpdatesParse(response: Response): List<Novel> =
+        parseCardLinks(response.asJsoup(), ".hc-card a.hc-card-cover")
+
+    // The /type/novel/ archive backs the filter endpoint's card fragment and the
+    // unfiltered-search fallback.
     private fun browseRequest(page: Int): Request =
         if (page <= 1) GET("$baseUrl/type/novel/") else GET("$baseUrl/type/novel/page/$page/")
 
-    override suspend fun popularNovelsParse(response: Response): List<Novel> =
-        parseCards(response.asJsoup())
-
-    override suspend fun latestUpdatesParse(response: Response): List<Novel> =
-        parseCards(response.asJsoup())
-
-    // Card markup is shared by the archive page and the filter endpoint's
-    // `data.html` fragment, so both feed through here.
-    private fun parseCards(doc: Document): List<Novel> {
-        return doc.select("article.ac-grid2-card").mapNotNull { card ->
-            val link = card.selectFirst("a.ac-grid2-cover-link, a[href*=/novel/]")
-                ?: return@mapNotNull null
+    // Cards across the site share the shape "<a href title> with a cover img or
+    // background-image"; only the wrapping selector differs, so callers pass it.
+    private fun parseCardLinks(doc: Document, selector: String): List<Novel> =
+        doc.select(selector).mapNotNull { link ->
             val href = link.attr("href").trim().takeIf { it.isNotEmpty() }
                 ?: return@mapNotNull null
             val title = link.attr("title").trim()
-                .ifEmpty { card.selectFirst(".ac-grid2-title, h2, h3")?.text()?.trim().orEmpty() }
+                .ifEmpty { link.selectFirst("img")?.attr("alt")?.trim().orEmpty() }
+                .ifEmpty { link.text().trim() }
                 .takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             Novel(
                 url = absUrl(href),
                 title = title,
-                thumbnailUrl = card.selectFirst(".ac-grid2-cover, [style*=background-image]")
-                    ?.let { bgImage(it) }
-                    ?: card.selectFirst("img")?.imageUrl(),
+                // Cover is an <img> (trending), a background-image on the link
+                // itself (latest), or on a child wrapper (archive grid cards).
+                thumbnailUrl = link.selectFirst("img")?.imageUrl()
+                    ?: bgImage(link)
+                    ?: link.selectFirst("[style*=background-image]")?.let { bgImage(it) },
             )
         }.distinctBy { it.url }
-    }
+
+    // The /type/novel/ archive + filter endpoint use `article.ac-grid2-card`.
+    private fun parseCards(doc: Document): List<Novel> =
+        parseCardLinks(doc, "article.ac-grid2-card a.ac-grid2-cover-link, article.ac-grid2-card a[href*=/novel/]")
+
+    private fun otherPage(response: Response): Boolean =
+        response.request.url.queryParameter(PAGE_MARKER).let { it != null && it != "1" }
 
     // A plain query (no active filters) uses the simple, nonce-free
     // `ac_search_series` endpoint. As soon as any filter is set, the request
@@ -290,15 +302,31 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
 
     override suspend fun chapterListParse(response: Response): List<Chapter> {
         val doc = response.asJsoup()
-        // `#chapters` server-renders every chapter as `.chapter-row > a.chapter-el`;
-        // `data-num` is the chapter number, the inner span is its title.
-        val chapters = doc.select("#chapters a.chapter-el[href]").mapNotNull { link ->
-            val href = link.attr("href").trim().takeIf { it.isNotEmpty() && "/chapter-" in it }
-                ?: return@mapNotNull null
-            val name = link.selectFirst("span")?.text()?.trim()
-                ?.takeIf { it.isNotEmpty() } ?: link.text().trim()
-            val num = link.parent()?.attr("data-num")?.toFloatOrNull() ?: -1f
-            Chapter(url = absUrl(href), name = name, chapterNumber = num)
+        // `#chapters` server-renders the full list; each `a.chapter-el` carries
+        // its metadata on data-* attributes: data-ac-locked ("1" for premium),
+        // data-ac-cost (coin price), data-ac-chapter-label ("Chapter N"),
+        // data-ac-chapter-date (M/D/YYYY). The `.chapter-row` parent's data-num
+        // is a fallback number.
+        val chapters = doc.select("#chapters a.chapter-el").mapNotNull { link ->
+            val href = link.attr("data-ac-href").trim().ifEmpty { link.attr("href").trim() }
+                .takeIf { it.isNotEmpty() && "/chapter-" in it } ?: return@mapNotNull null
+            val label = link.attr("data-ac-chapter-label").trim()
+                .ifEmpty { link.selectFirst("span")?.text()?.trim().orEmpty() }
+                .ifEmpty { link.ownText().trim() }
+                .takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+            val number = Regex("""[\d.]+""").find(label)?.value?.toFloatOrNull()
+                ?: link.parent()?.attr("data-num")?.toFloatOrNull()
+                ?: -1f
+            // A chapter is locked when the site flags it premium / priced.
+            val locked = link.attr("data-ac-locked").trim() == "1" ||
+                (link.attr("data-ac-cost").trim().toIntOrNull() ?: 0) > 0
+            Chapter(
+                url = absUrl(href),
+                name = label,
+                chapterNumber = number,
+                uploadDate = parseDate(link.attr("data-ac-chapter-date")),
+                locked = locked,
+            )
         }.distinctBy { it.url }
         // The list renders newest-first; the reader expects ascending order.
         val ordered = if (chapters.any { it.chapterNumber >= 0f }) {
@@ -309,6 +337,15 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
         return ordered.mapIndexed { i, ch ->
             if (ch.chapterNumber >= 0f) ch else ch.copy(chapterNumber = (i + 1).toFloat())
         }
+    }
+
+    // data-ac-chapter-date is "M/D/YYYY"; 0L when absent/unparseable.
+    private fun parseDate(raw: String): Long {
+        val value = raw.trim().takeIf { it.isNotEmpty() } ?: return 0L
+        return runCatching {
+            java.text.SimpleDateFormat("M/d/yyyy", java.util.Locale.US)
+                .parse(value)?.time ?: 0L
+        }.getOrDefault(0L)
     }
 
     // --- Chapter content ------------------------------------------------------
