@@ -227,7 +227,11 @@ class LibGen :
                 ?: return@mapNotNull null
             val title = editionLink.text().trim().takeIf { it.isNotEmpty() }
                 ?: return@mapNotNull null
-            val language = cells.getOrNull(4)?.text()?.trim()?.takeIf { it.isNotEmpty() }
+            // The trailing columns are stable (… Language, Pages, Size, Ext,
+            // Mirrors), so index them from the end — covers=on prepends a cover
+            // cell that would otherwise shift fixed front indices.
+            val language = cells.getOrNull(cells.size - 5)?.text()?.trim()
+                ?.takeIf { it.isNotEmpty() }
             if (enabledLanguages.isNotEmpty() &&
                 language?.lowercase() !in enabledLanguages
             ) {
@@ -239,8 +243,8 @@ class LibGen :
                 // ignores the extra query param on edition.php.
                 url = appendMd5(editionUrl, md5),
                 title = title,
-                author = cells.getOrNull(1)?.text()?.trim()?.removePrefix("by ")?.trim()
-                    ?.takeIf { it.isNotEmpty() },
+                author = cells.getOrNull(cells.size - 8)?.text()?.trim()
+                    ?.removePrefix("by ")?.trim()?.takeIf { it.isNotEmpty() },
                 thumbnailUrl = row.selectFirst("img")?.imageUrl(pageUrl),
                 language = language?.replaceFirstChar { it.uppercase() },
                 status = NovelStatus.COMPLETED,
