@@ -71,14 +71,16 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
 
     // --- Listings -------------------------------------------------------------
 
-    // Popular reads the /type/novel/ archive. (The homepage "Trending" rail
-    // would be the truer "popular", but it serves resized cover variants
-    // —`-400.webp`, doubled `.jpg.jpeg`— that the app's image loader fails to
-    // render; the archive cards expose the original covers, which display.)
-    override fun popularNovelsRequest(page: Int): Request = browseRequest(page)
+    // Popular is the homepage "Trending" rail (`.ac-trending-slider`), a single
+    // un-paginated set — the page marker lets the parser end pagination.
+    override fun popularNovelsRequest(page: Int): Request = GET("$baseUrl/?$PAGE_MARKER=$page")
 
-    override suspend fun popularNovelsParse(response: Response): List<Novel> =
-        parseCards(response.asJsoup())
+    override suspend fun popularNovelsParse(response: Response): List<Novel> {
+        if (response.request.url.queryParameter(PAGE_MARKER).let { it != null && it != "1" }) {
+            return emptyList()
+        }
+        return parseCardLinks(response.asJsoup(), "article.ac-trending-card a.ac-tc-cover")
+    }
 
     // Latest is the dedicated /latest/ feed, paginated by /latest/page/N/.
     override fun latestUpdatesRequest(page: Int): Request =
