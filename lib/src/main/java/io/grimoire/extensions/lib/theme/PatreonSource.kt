@@ -107,18 +107,12 @@ abstract class PatreonSource : HttpSource(), WebViewLoginSource {
             response.close()
             return emptyList()
         }
-        val catalogue = parseCatalogue(response)
-        return catalogue.collections.order().map { it.toNovel(catalogue.author) }
+        return parseCollections(response).order().map { it.toNovel() }
     }
 
-    private fun parseCatalogue(response: Response): Catalogue {
-        val root = jsonBody(response)
-        // The creator's display name is the campaign's own attribute; use it as
-        // the author for every collection so novels aren't authorless.
-        val author = root.optJSONObject("data")?.optJSONObject("attributes")
-            ?.optString("name")?.trim()?.takeIf { it.isNotEmpty() }
-        val included = root.optJSONArray("included") ?: return Catalogue(author, emptyList())
-        val collections = included.objects()
+    private fun parseCollections(response: Response): List<PatreonCollection> {
+        val included = jsonBody(response).optJSONArray("included") ?: return emptyList()
+        return included.objects()
             .filter { it.optString("type") == "collection" }
             .mapNotNull { obj ->
                 val id = obj.optString("id").trim().takeIf { it.isNotEmpty() } ?: return@mapNotNull null
@@ -132,10 +126,7 @@ abstract class PatreonSource : HttpSource(), WebViewLoginSource {
                     editedAt = parseDate(attrs.optString("edited_at").ifEmpty { attrs.optString("created_at") }),
                 )
             }
-        return Catalogue(author, collections)
     }
-
-    private data class Catalogue(val author: String?, val collections: List<PatreonCollection>)
 
     private data class PatreonCollection(
         val id: String,
@@ -146,13 +137,12 @@ abstract class PatreonSource : HttpSource(), WebViewLoginSource {
         val editedAt: Long,
     )
 
-    private fun PatreonCollection.toNovel(author: String?) = Novel(
+    private fun PatreonCollection.toNovel() = Novel(
         // A collection has no canonical web URL we need to fetch; encode the id
         // so novelDetails/chapterList can rebuild the API calls. See collectionId().
         url = "$baseUrl/collection/$id",
         title = title,
         thumbnailUrl = thumbnailUrl,
-        author = author,
         description = description,
         status = statusFromTitle(title),
     )
@@ -168,10 +158,9 @@ abstract class PatreonSource : HttpSource(), WebViewLoginSource {
 
     override suspend fun novelDetailsParse(response: Response): Novel {
         val wantId = (response.request.url.fragment ?: "").substringAfter("c=", "")
-        val catalogue = parseCatalogue(response)
-        val match = catalogue.collections.firstOrNull { it.id == wantId }
+        val match = parseCollections(response).firstOrNull { it.id == wantId }
             ?: throw IOException("Patreon: collection $wantId not found in this campaign.")
-        return match.toNovel(catalogue.author).copy(initialized = true)
+        return match.toNovel().copy(initialized = true)
     }
 
     // --- Chapter list ---------------------------------------------------------
