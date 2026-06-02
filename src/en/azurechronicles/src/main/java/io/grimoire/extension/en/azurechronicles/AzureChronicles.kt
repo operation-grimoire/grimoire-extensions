@@ -51,7 +51,7 @@ import java.io.IOException
     name = "Azure Chronicles",
     lang = "en",
     baseUrl = "https://azurechronicles.com",
-    versionCode = 2,
+    versionCode = 3,
 )
 class AzureChronicles : HttpSource(), WebViewLoginSource {
 
@@ -276,6 +276,11 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
 
     override suspend fun novelDetailsParse(response: Response): Novel {
         val pageUrl = response.request.url.toString()
+        // A removed novel 404s to a "Page Not Found" template whose only h1 is
+        // "404"; without this guard that text would be scraped as the title.
+        if (!response.isSuccessful) {
+            throw IOException("Azure Chronicles: novel not found (HTTP ${response.code}) — it may have been removed.")
+        }
         val doc = response.asJsoup()
         fun meta(prop: String) = doc.selectFirst("meta[property=og:$prop], meta[name=$prop]")
             ?.attr("content")?.trim()?.takeIf { it.isNotEmpty() }
