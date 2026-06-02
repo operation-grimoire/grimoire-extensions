@@ -305,7 +305,11 @@ abstract class PatreonSource : HttpSource(), WebViewLoginSource {
     // --- WebViewLoginSource ---------------------------------------------------
 
     override val loginUrl: String get() = "$baseUrl/login"
-    override val loginSuccessUrl: String get() = baseUrl
+
+    // A successful sign-in redirects to the logged-in home feed. Match that
+    // rather than baseUrl itself — baseUrl is a substring of the /login page, so
+    // the host could otherwise treat login as complete the instant it opens.
+    override val loginSuccessUrl: String get() = "$baseUrl/home"
 
     // Patreon sets `session_id` only once authenticated — an anonymous visit
     // sets just Cloudflare cookies (__cf_bm / _cfuvid).
