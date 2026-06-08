@@ -63,10 +63,10 @@ class RoyalRoad : HttpSource() {
                     ?.takeIf { it.param != "ALL" }
                     ?.let { url.addQueryParameter("type", it.param) }
 
-                is SortFilter -> filter.state?.let { sel ->
-                    url.addQueryParameter("orderBy", ORDER_BY[sel.index].param)
-                    url.addQueryParameter("dir", if (sel.ascending) "asc" else "desc")
-                }
+                is SortByFilter -> ORDER_BY.getOrNull(filter.state)
+                    ?.let { url.addQueryParameter("orderBy", it.param) }
+
+                is OrderFilter -> url.addQueryParameter("dir", if (filter.state == 1) "asc" else "desc")
 
                 // Tags + content warnings both submit through tagsAdd/tagsRemove;
                 // a tri-state per entry maps INCLUDE -> add, EXCLUDE -> remove.
@@ -217,9 +217,8 @@ class RoyalRoad : HttpSource() {
     // and content warnings are tri-state (include -> tagsAdd, exclude -> tagsRemove).
 
     override fun getFilterList(): List<Filter<*>> = listOf(
-        Filter.Header("Sort"),
-        SortFilter(),
-        Filter.Separator(),
+        SortByFilter(),
+        OrderFilter(),
         StatusFilter(),
         TypeFilter(),
         TagGroup("Genres & Tags", TAGS),
@@ -240,8 +239,10 @@ class RoyalRoad : HttpSource() {
 
     private class StatusFilter : Filter.Select<String>("Status", STATUS.labels())
     private class TypeFilter : Filter.Select<String>("Type", TYPE.labels())
-    private class SortFilter :
-        Filter.Sort("Sort by", ORDER_BY.labels(), Filter.Sort.Selection(0, ascending = false))
+    // Sort is two compact dropdowns rather than Filter.Sort, whose always-expanded
+    // 10-row radio list would dominate the sheet and dwarf the other controls.
+    private class SortByFilter : Filter.Select<String>("Sort by", ORDER_BY.labels())
+    private class OrderFilter : Filter.Select<String>("Order", arrayOf("Descending", "Ascending"))
 
     /** A tri-state group; child `state` order lines up with [tags] by index. */
     internal class TagGroup(name: String, val tags: List<Tag>) :

@@ -262,7 +262,8 @@ class RoyalRoadTest {
     @Test
     fun `getFilterList exposes the full static filter set`() {
         val filters = source.getFilterList()
-        assertTrue(filters.any { it is Filter.Sort && it.name == "Sort by" })
+        assertTrue(filters.any { it is Filter.Select<*> && it.name == "Sort by" })
+        assertTrue(filters.any { it is Filter.Select<*> && it.name == "Order" })
         assertTrue(filters.any { it is Filter.Select<*> && it.name == "Status" })
         assertTrue(filters.any { it is Filter.Select<*> && it.name == "Type" })
         // Free-text refinements are present.
@@ -302,8 +303,8 @@ class RoyalRoadTest {
         val filters = source.getFilterList()
         (named(filters, "Status") as Filter.Select<*>).state = 1 // Ongoing
         (named(filters, "Type") as Filter.Select<*>).state = 2 // Original
-        // Average Rating (index 2), ascending.
-        (named(filters, "Sort by") as Filter.Sort).state = Filter.Sort.Selection(2, ascending = true)
+        (named(filters, "Sort by") as Filter.Select<*>).state = 2 // Average Rating
+        (named(filters, "Order") as Filter.Select<*>).state = 1 // Ascending
         named(filters, "Min pages").let { (it as Filter.Text).state = "200" }
         named(filters, "Author").let { (it as Filter.Text).state = "  nobody103  " }
 
