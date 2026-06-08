@@ -262,8 +262,12 @@ class RoyalRoadTest {
     @Test
     fun `getFilterList exposes the full static filter set`() {
         val filters = source.getFilterList()
-        assertEquals(11, filters.size)
         assertTrue(filters.any { it is Filter.Sort && it.name == "Sort by" })
+        assertTrue(filters.any { it is Filter.Select<*> && it.name == "Status" })
+        assertTrue(filters.any { it is Filter.Select<*> && it.name == "Type" })
+        // Free-text refinements are present.
+        listOf("Author", "Min pages", "Max pages", "Min rating (0.5–5)", "Max rating (0.5–5)")
+            .forEach { name -> assertTrue(filters.any { it is Filter.Text && it.name == name }, "missing $name") }
         val groups = filters.filterIsInstance<RoyalRoad.TagGroup>()
         assertEquals(2, groups.size)
         val tags = groups.first { it.name == "Genres & Tags" }

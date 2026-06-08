@@ -217,17 +217,23 @@ class RoyalRoad : HttpSource() {
     // and content warnings are tri-state (include -> tagsAdd, exclude -> tagsRemove).
 
     override fun getFilterList(): List<Filter<*>> = listOf(
-        Filter.Text(KEYWORD),
-        Filter.Text(AUTHOR),
+        Filter.Header("Sort"),
+        SortFilter(),
+        Filter.Separator(),
         StatusFilter(),
         TypeFilter(),
-        SortFilter(),
+        TagGroup("Genres & Tags", TAGS),
+        TagGroup("Content Warnings", CONTENT_WARNINGS),
+        Filter.Separator(),
+        // Free-text refinements grouped at the bottom so they don't read like
+        // three stacked search bars above the categorical filters.
+        Filter.Header("Advanced"),
+        Filter.Text(KEYWORD),
+        Filter.Text(AUTHOR),
         Filter.Text(MIN_PAGES),
         Filter.Text(MAX_PAGES),
         Filter.Text(MIN_RATING),
         Filter.Text(MAX_RATING),
-        TagGroup("Genres & Tags", TAGS),
-        TagGroup("Content Warnings", CONTENT_WARNINGS),
     )
 
     internal data class Tag(val value: String, val label: String)
