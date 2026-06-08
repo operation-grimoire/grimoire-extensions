@@ -3,11 +3,16 @@ agp = "9.2.1"
 extensionsApi = "0.6.0"
 junitJupiter = "5.10.2"
 junitPlatform = "1.10.2"
+orgJson = "20240303"
 
 [libraries]
 grimoire-extensions-api = { group = "io.grimoire", name = "extensions-api", version.ref = "extensionsApi" }
 junit-jupiter = { group = "org.junit.jupiter", name = "junit-jupiter", version.ref = "junitJupiter" }
 junit-platform-launcher = { group = "org.junit.platform", name = "junit-platform-launcher", version.ref = "junitPlatform" }
+# Real org.json for unit tests: Android's bundled org.json is a stub that
+# returns default values under `unitTests.isReturnDefaultValues`, so tests that
+# actually parse JSON must pull the genuine implementation onto the test classpath.
+org-json = { group = "org.json", name = "json", version.ref = "orgJson" }
 
 [plugins]
 android-library = { id = "com.android.library", version.ref = "agp" }
