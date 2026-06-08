@@ -1,0 +1,51 @@
+plugins {
+    alias(libs.plugins.android.application)
+}
+
+android {
+    namespace = "io.grimoire.extension.en.royalroad"
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = "io.grimoire.extension.en.royalroad"
+        minSdk = 26
+        targetSdk = 36
+        versionCode = 1
+        versionName = "1.0.0"
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+        }
+    }
+
+    // Unit tests parse captured HTML with Jsoup; nothing actually touches
+    // Android APIs, but the source constructor transitively initializes the
+    // default OkHttp client (which reaches into android.webkit). Returning
+    // default values lets that initializer set its field to null rather than
+    // throw — same workaround the sibling extensions' test setups use.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+}
+
+dependencies {
+    implementation(project(":lib"))
+    testImplementation(libs.junit.jupiter)
+    // Chapter list + rating parsing go through org.json; the Android stub returns
+    // default values under returnDefaultValues, so tests need the real impl.
+    testImplementation(libs.org.json)
+    // Gradle 9 no longer auto-resolves the JUnit Platform Launcher from
+    // ServiceLoader — without this dep tests are silently discovered as zero.
+    testRuntimeOnly(libs.junit.platform.launcher)
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
+}
