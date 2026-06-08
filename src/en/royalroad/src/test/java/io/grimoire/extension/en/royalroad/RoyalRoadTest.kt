@@ -1,5 +1,6 @@
 package io.grimoire.extension.en.royalroad
 
+import io.grimoire.api.model.Filter
 import io.grimoire.api.model.NovelStatus
 import org.jsoup.Jsoup
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -245,5 +246,82 @@ class RoyalRoadTest {
         )
         assertEquals("https://www.royalroadcdn.com/illustration.jpg", pages.single().imageUrl)
         assertEquals("", pages.single().text)
+    }
+
+    // --- Filters ------------------------------------------------------------
+
+    private fun named(filters: List<Filter<*>>, name: String) = filters.first { it.name == name }
+
+    private fun RoyalRoad.TagGroup.set(value: String, state: Int) {
+        val i = tags.indexOfFirst { it.value == value }
+        require(i >= 0) { "unknown tag $value" }
+        @Suppress("UNCHECKED_CAST")
+        (this.state as List<Filter.TriState>)[i].state = state
+    }
+
+    @Test
+    fun `getFilterList exposes the full static filter set`() {
+        val filters = source.getFilterList()
+        assertEquals(11, filters.size)
+        assertTrue(filters.any { it is Filter.Sort && it.name == "Sort by" })
+        val groups = filters.filterIsInstance<RoyalRoad.TagGroup>()
+        assertEquals(2, groups.size)
+        val tags = groups.first { it.name == "Genres & Tags" }
+        assertEquals(72, tags.tags.size)
+        assertTrue(tags.tags.any { it.value == "litrpg" && it.label == "LitRPG" })
+        // Static filters require no network fetch.
+        assertFalse(source.hasDynamicFilters)
+        assertTrue(source.supportsSearchWithFilters)
+    }
+
+    @Test
+    fun `tri-state tags map to tagsAdd and tagsRemove`() {
+        val filters = source.getFilterList()
+        val genres = filters.filterIsInstance<RoyalRoad.TagGroup>().first { it.name == "Genres & Tags" }
+        genres.set("litrpg", Filter.TriState.STATE_INCLUDE)
+        genres.set("magic", Filter.TriState.STATE_INCLUDE)
+        genres.set("harem", Filter.TriState.STATE_EXCLUDE)
+        // A content warning excluded through the same mechanism.
+        val warnings = filters.filterIsInstance<RoyalRoad.TagGroup>().first { it.name == "Content Warnings" }
+        warnings.set("ai_generated", Filter.TriState.STATE_EXCLUDE)
+
+        val url = source.searchNovelsRequest("dungeon", 2, filters).url
+        assertEquals(listOf("litrpg", "magic"), url.queryParameterValues("tagsAdd"))
+        assertEquals(listOf("harem", "ai_generated"), url.queryParameterValues("tagsRemove"))
+        assertEquals("dungeon", url.queryParameter("title"))
+        assertEquals("2", url.queryParameter("page"))
+        assertEquals("false", url.queryParameter("globalFilters"))
+    }
+
+    @Test
+    fun `status, type, sort and numeric filters map to query params`() {
+        val filters = source.getFilterList()
+        (named(filters, "Status") as Filter.Select<*>).state = 1 // Ongoing
+        (named(filters, "Type") as Filter.Select<*>).state = 2 // Original
+        // Average Rating (index 2), ascending.
+        (named(filters, "Sort by") as Filter.Sort).state = Filter.Sort.Selection(2, ascending = true)
+        named(filters, "Min pages").let { (it as Filter.Text).state = "200" }
+        named(filters, "Author").let { (it as Filter.Text).state = "  nobody103  " }
+
+        val url = source.searchNovelsRequest("", 1, filters).url
+        assertEquals("ONGOING", url.queryParameter("status"))
+        assertEquals("original", url.queryParameter("type"))
+        assertEquals("rating", url.queryParameter("orderBy"))
+        assertEquals("asc", url.queryParameter("dir"))
+        assertEquals("200", url.queryParameter("minPages"))
+        assertEquals("nobody103", url.queryParameter("author")) // trimmed
+        // No query => no title param.
+        assertNull(url.queryParameter("title"))
+    }
+
+    @Test
+    fun `untouched filters omit ALL-valued selects and blank text`() {
+        val url = source.searchNovelsRequest("world", 1, source.getFilterList()).url
+        // Status/Type default to "ALL" and are dropped; no tags selected.
+        assertNull(url.queryParameter("status"))
+        assertNull(url.queryParameter("type"))
+        assertTrue(url.queryParameterValues("tagsAdd").isEmpty())
+        assertNull(url.queryParameter("minPages"))
+        assertEquals("world", url.queryParameter("title"))
     }
 }
