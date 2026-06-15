@@ -116,6 +116,31 @@ class RoyalRoadTest {
     }
 
     @Test
+    fun `description keeps paragraph breaks, inline formatting and links`() {
+        val novel = source.novelDetailsFromDocument(
+            doc(
+                """
+                <html><body>
+                <div class="row fic-header"><div class="col"><h1>X</h1></div></div>
+                <div class="description"><div class="hidden-content">
+                  <p>First <strong>paragraph</strong> of the synopsis.</p>
+                  <p>Second one with a <a href="https://example.com/more">link</a>.</p>
+                </div></div>
+                </body></html>
+                """.trimIndent(),
+            ),
+            "https://www.royalroad.com/fiction/1/x",
+        )
+        val desc = novel.description!!
+        // Paragraphs are separated for fromHtml, inline formatting + link preserved.
+        assertTrue(desc.contains("<br><br>"))
+        assertTrue(desc.contains("<b>paragraph</b>"))
+        assertTrue(desc.contains("""<a href="https://example.com/more">link</a>"""))
+        // No collapsed run of three-or-more breaks.
+        assertFalse(desc.contains("<br><br><br>"))
+    }
+
+    @Test
     fun `ongoing status is recognised over the Original type label`() {
         val novel = source.novelDetailsFromDocument(
             doc(

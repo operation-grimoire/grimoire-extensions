@@ -6,6 +6,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.ParsedHttpSource
+import io.grimoire.api.network.richDescription
 import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.SourceInfo
 import okhttp3.Request
@@ -83,7 +84,7 @@ class LightNovelsTranslations : ParsedHttpSource() {
             title = document.selectFirst("div.novel_title h3")?.text()?.trim().orEmpty(),
             thumbnailUrl = document.selectFirst("div.novel-image img")?.absUrl("src"),
             author = author,
-            description = document.selectFirst("div.novel_text")?.text()?.trim(),
+            description = document.selectFirst("div.novel_text")?.richDescription()?.takeIf { it.isNotBlank() },
             genres = document.select("div.novel_tags_item span").map { it.text().trim() }
                 .filter { it.isNotEmpty() },
             status = document.selectFirst("div.novel_status")?.text().toNovelStatus(),

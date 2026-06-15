@@ -6,6 +6,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
+import io.grimoire.api.network.richDescription
 import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.SourceInfo
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -123,7 +124,7 @@ class RoyalRoad : HttpSource() {
             title = doc.selectFirst("div.fic-header h1")?.text()?.trim().orEmpty(),
             thumbnailUrl = doc.selectFirst("div.cover-art-container img")?.absUrl("src").cleanCover(),
             author = doc.selectFirst("div.fic-header h4 a")?.text()?.trim()?.takeIf { it.isNotEmpty() },
-            description = doc.selectFirst("div.description")?.text()?.trim()?.takeIf { it.isNotEmpty() },
+            description = doc.selectFirst("div.description")?.richDescription()?.takeIf { it.isNotBlank() },
             genres = doc.select("a.fiction-tag").map { it.text().trim() }.filter { it.isNotEmpty() },
             status = statusText.toNovelStatus(),
             rating = rating,

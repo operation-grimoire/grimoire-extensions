@@ -7,6 +7,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
+import io.grimoire.api.network.richDescription
 import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.source.WebViewLoginSource
@@ -572,7 +573,7 @@ class WebNovel : HttpSource(), WebViewLoginSource {
             author = doc.selectFirst("a[href*=/profile/], [class*=author] a")
                 ?.text()?.trim()?.removePrefix("Author:")?.trim()?.takeIf { it.isNotEmpty() },
             description = doc.selectFirst(".j_synopsis, [class*=synopsis], [class*=description]")
-                ?.text()?.trim()?.takeIf { it.isNotEmpty() }
+                ?.richDescription()?.takeIf { it.isNotBlank() }
                 ?: meta("description"),
             genres = doc.select("a[href*=/tags/], a[href*=/category]")
                 .map { it.text().trim() }

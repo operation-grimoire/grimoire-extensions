@@ -7,6 +7,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
+import io.grimoire.api.network.richDescription
 import io.grimoire.api.source.ConfigValidationResult
 import io.grimoire.api.source.ConfigurableSource
 import io.grimoire.api.source.EpubSource
@@ -316,7 +317,7 @@ class ZLibrary :
             ?: ogTitle.substringBefore(" | ").trim().takeIf { it.isNotEmpty() }
             ?: ogTitle
         val description = doc.selectFirst("#bookDescriptionBox, [itemprop=description]")
-            ?.text()?.trim()?.takeIf { it.isNotEmpty() }
+            ?.richDescription()?.takeIf { it.isNotBlank() }
             ?: meta("description")
         val author = doc.selectFirst("a.color1[title], [itemprop=author], .book-property__author a")
             ?.text()?.trim()?.takeIf { it.isNotEmpty() }

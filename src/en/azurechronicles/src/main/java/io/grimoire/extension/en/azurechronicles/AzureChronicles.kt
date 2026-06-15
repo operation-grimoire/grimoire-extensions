@@ -7,6 +7,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
+import io.grimoire.api.network.richDescription
 import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.source.WebViewLoginSource
@@ -313,7 +314,7 @@ class AzureChronicles : HttpSource(), WebViewLoginSource {
                 doc.selectFirst("#synopsis-content")
                     ?: doc.selectFirst("[id*=synopsis]")
                     ?: doc.selectFirst("[class*=synopsis]")
-                )?.text()?.trim()?.takeIf { it.isNotEmpty() },
+                )?.richDescription()?.takeIf { it.isNotBlank() },
             genres = doc.select("#ac-genres-row a[href*=/genre/]")
                 .map { it.text().trim() }.filter { it.isNotEmpty() }.distinct(),
             status = status,
