@@ -5,6 +5,7 @@ import io.grimoire.api.model.Filter
 import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.network.ParsedHttpSource
+import io.grimoire.api.network.richDescription
 import io.grimoire.api.network.richHtml
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -128,7 +129,7 @@ abstract class WPNovelsSource : ParsedHttpSource() {
                 document.selectFirst("div.summary__content")
                     ?: document.selectFirst("div.description-summary div.summary__content")
                     ?: document.selectFirst("div.manga-excerpt")
-                )?.text(),
+                )?.richDescription()?.takeIf { it.isNotBlank() },
             genres = document.select("div.genres-content a").map { it.text() },
             status = document.selectFirst("div.summary-content")?.text().toNovelStatus(),
             rating = ratingValue,

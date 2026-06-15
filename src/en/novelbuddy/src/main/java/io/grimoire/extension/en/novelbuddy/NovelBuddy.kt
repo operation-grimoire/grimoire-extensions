@@ -6,6 +6,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
+import io.grimoire.api.network.richDescription
 import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.SourceInfo
 import kotlinx.coroutines.Dispatchers
@@ -90,7 +91,8 @@ class NovelBuddy : HttpSource() {
                 }
             else null,
             description = manga.optString("summary").let { summaryHtml ->
-                if (summaryHtml.isEmpty()) null else Jsoup.parse(summaryHtml).text()
+                if (summaryHtml.isEmpty()) null
+                else Jsoup.parse(summaryHtml).body().richDescription().takeIf { it.isNotBlank() }
             },
             genres = if (genresArr != null)
                 (0 until genresArr.length()).map { genresArr.getJSONObject(it).getString("name") }

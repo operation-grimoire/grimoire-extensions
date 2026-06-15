@@ -6,6 +6,7 @@ import io.grimoire.api.model.Novel
 import io.grimoire.api.model.NovelPage
 import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.ParsedHttpSource
+import io.grimoire.api.network.richDescription
 import io.grimoire.api.network.richHtml
 import io.grimoire.api.source.PaginatedSource
 import kotlinx.coroutines.Dispatchers
@@ -68,7 +69,7 @@ abstract class NovelFullThemeSource : ParsedHttpSource(), PaginatedSource {
             title = document.selectFirst("h3.title")!!.text(),
             thumbnailUrl = document.selectFirst(".book img")?.absUrl("src"),
             author = document.selectFirst(".info a[href*=/author/]")?.text(),
-            description = document.selectFirst(".desc-text")?.text(),
+            description = document.selectFirst(".desc-text")?.richDescription()?.takeIf { it.isNotBlank() },
             genres = document.select(".info a[href*=/genre/]").map { it.text() },
             status = document.selectFirst(".info h3:contains(Status) + a")?.text().toNovelStatus(),
             rating = rating,
