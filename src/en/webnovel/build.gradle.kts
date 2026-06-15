@@ -10,8 +10,8 @@ android {
         applicationId = "io.grimoire.extension.en.webnovel"
         minSdk = 26
         targetSdk = 36
-        versionCode = 25
-        versionName = "1.0.24"
+        versionCode = 26
+        versionName = "1.0.25"
     }
 
     compileOptions {
