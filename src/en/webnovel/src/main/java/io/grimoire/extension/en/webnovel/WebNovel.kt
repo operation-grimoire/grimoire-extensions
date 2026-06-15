@@ -43,7 +43,7 @@ import java.net.URLEncoder
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
-    versionCode = 25,
+    versionCode = 26,
     novelUpdatesGroups = ["Webnovel"],
 )
 class WebNovel : HttpSource(), WebViewLoginSource {

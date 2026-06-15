@@ -52,7 +52,7 @@ import java.io.IOException
     name = "Azure Chronicles",
     lang = "en",
     baseUrl = "https://azurechronicles.com",
-    versionCode = 4,
+    versionCode = 5,
     novelUpdatesGroups = ["Azure Chronicles"],
 )
 class AzureChronicles : HttpSource(), WebViewLoginSource {

@@ -24,7 +24,7 @@ import java.time.Instant
     name = "Royal Road",
     lang = "en",
     baseUrl = "https://www.royalroad.com",
-    versionCode = 1,
+    versionCode = 2,
     novelUpdatesGroups = ["Royal Road"],
 )
 class RoyalRoad : HttpSource() {

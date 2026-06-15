@@ -56,7 +56,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.im",
-    versionCode = 23,
+    versionCode = 24,
 )
 class ZLibrary :
     HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource, WebViewLoginSource {
