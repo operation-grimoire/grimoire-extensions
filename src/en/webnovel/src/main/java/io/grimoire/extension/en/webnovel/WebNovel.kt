@@ -42,7 +42,6 @@ import java.net.URLEncoder
  * those are reported with [Chapter.locked] = `true`.
  */
 @SourceInfo(
-    id = 8L,
     name = "Webnovel",
     lang = "en",
     baseUrl = "https://www.webnovel.com",
@@ -51,7 +50,6 @@ import java.net.URLEncoder
 )
 class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
 
-    override val id = 8L
     override val name = "Webnovel"
     override val lang = "en"
     override val baseUrl = "https://www.webnovel.com"

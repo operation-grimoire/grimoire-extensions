@@ -15,7 +15,6 @@ import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 @SourceInfo(
-    id = 7L,
     name = "Light Novels Translations",
     lang = "en",
     baseUrl = "https://lightnovelstranslations.com",
@@ -24,7 +23,6 @@ import java.net.URLEncoder
 )
 class LightNovelsTranslations : ParsedHttpSource() {
 
-    override val id = 7L
     override val name = "Light Novels Translations"
     override val lang = "en"
     override val baseUrl = "https://lightnovelstranslations.com"

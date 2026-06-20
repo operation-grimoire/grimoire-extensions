@@ -17,7 +17,6 @@ import java.time.format.DateTimeParseException
 import java.util.Locale
 
 @SourceInfo(
-    id = 5L,
     name = "Foxaholic",
     lang = "en",
     baseUrl = "https://www.foxaholic.com",
@@ -25,7 +24,6 @@ import java.util.Locale
     novelUpdatesGroups = ["Foxaholic"],
 )
 class Foxaholic : WPNovelsSource() {
-    override val id = 5L
     override val name = "Foxaholic"
     override val lang = "en"
     override val baseUrl = "https://www.foxaholic.com"

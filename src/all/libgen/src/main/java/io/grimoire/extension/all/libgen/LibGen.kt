@@ -48,7 +48,6 @@ import java.io.IOException
  * [pageListParse] are intentionally empty.
  */
 @SourceInfo(
-    id = 9L,
     name = "Library Genesis",
     lang = "all",
     baseUrl = "https://libgen.la",
@@ -57,7 +56,6 @@ import java.io.IOException
 class LibGen :
     HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource, MultiHostSource {
 
-    override val id = 9L
     override val name = "Library Genesis"
     override val lang = "all"
 

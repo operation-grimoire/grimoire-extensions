@@ -20,7 +20,6 @@ import org.jsoup.nodes.Element
 import java.time.Instant
 
 @SourceInfo(
-    id = 12L,
     name = "Royal Road",
     lang = "en",
     baseUrl = "https://www.royalroad.com",
@@ -29,7 +28,6 @@ import java.time.Instant
 )
 class RoyalRoad : HttpSource() {
 
-    override val id = 12L
     override val name = "Royal Road"
     override val lang = "en"
     override val baseUrl = "https://www.royalroad.com"

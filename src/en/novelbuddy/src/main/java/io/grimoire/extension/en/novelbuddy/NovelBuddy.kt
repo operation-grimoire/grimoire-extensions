@@ -15,10 +15,9 @@ import okhttp3.Response
 import org.json.JSONObject
 import org.jsoup.Jsoup
 
-@SourceInfo(id = 2L, name = "NovelBuddy", lang = "en", baseUrl = "https://novelbuddy.com", versionCode = 7)
+@SourceInfo(name = "NovelBuddy", lang = "en", baseUrl = "https://novelbuddy.com", versionCode = 7)
 class NovelBuddy : HttpSource() {
 
-    override val id = 2L
     override val name = "NovelBuddy"
     override val lang = "en"
     override val baseUrl = "https://novelbuddy.com"
