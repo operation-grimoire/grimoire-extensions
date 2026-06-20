@@ -9,7 +9,9 @@ import io.grimoire.api.model.NovelStatus
 import io.grimoire.api.network.HttpSource
 import io.grimoire.api.network.richDescription
 import io.grimoire.api.network.richHtml
+import io.grimoire.api.source.ConfigurableSource
 import io.grimoire.api.source.SourceInfo
+import io.grimoire.api.source.SourcePreference
 import io.grimoire.api.source.WebViewLoginSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -22,6 +24,7 @@ import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import org.jsoup.parser.Parser
 import java.io.IOException
 import java.net.URLEncoder
 
@@ -46,12 +49,33 @@ import java.net.URLEncoder
     versionCode = 26,
     novelUpdatesGroups = ["Webnovel"],
 )
-class WebNovel : HttpSource(), WebViewLoginSource {
+class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
 
     override val id = 8L
     override val name = "Webnovel"
     override val lang = "en"
     override val baseUrl = "https://www.webnovel.com"
+
+    // Which power-ranking section "Popular" shows. Defaults to the male-lead
+    // list (webnovel.com's main ranking); a preference flips it to female-lead.
+    @Volatile
+    private var rankingSex: Int = SEX_MALE
+
+    // --- ConfigurableSource --------------------------------------------------
+
+    override fun getPreferences(): List<SourcePreference> = listOf(
+        SourcePreference.Switch(
+            key = PREF_FEMALE_RANKING,
+            title = "Female-lead Popular ranking",
+            summary = "Show the female-lead power ranking on the Popular tab " +
+                "instead of the male-lead one.",
+            default = false,
+        ),
+    )
+
+    override fun setPreferences(values: Map<String, String>) {
+        rankingSex = if (values[PREF_FEMALE_RANKING] == "true") SEX_FEMALE else SEX_MALE
+    }
 
     // Book urls already returned for the current listing, so paging never
     // repeats one (reset whenever page 1 is requested).
@@ -124,7 +148,13 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     override fun popularNovelsRequest(page: Int): Request {
         val query = rankApiQuery
         if (page <= 1 || query == null) {
-            return GET("$RANKING_URL?pageIndex=$page")
+            // The power ranking is split into a male-lead (sex=1) and
+            // female-lead (sex=2) section; with no sex param the mobile site
+            // defaults to sex=2, so "Popular" would otherwise be the
+            // romance-heavy female list. Pin the section explicitly (user
+            // choice via getPreferences, default male) so the default matches
+            // webnovel.com's main ranking.
+            return GET("$RANKING_URL?sex=$rankingSex&pageIndex=$page")
         }
         val csrf = runCatching {
             cookieValue(CookieManager.getInstance().getCookie(RANKING_URL).orEmpty(), "_csrfToken")
@@ -195,11 +225,14 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         if (response.request.url.toString().contains("getRankList")) {
             return paginate(seen, requestedPage(response), apiBooks(body))
         }
-        // Ranking pages emit the ordered list as a JSON-LD ItemList block.
-        val books = rankedFromJsonLd(body).ifEmpty {
-            val doc = Jsoup.parse(body, response.request.url.toString())
-            booksFromNextData(body).ifEmpty { parseBookList(doc) }
-        }
+        // The desktop ranking page renders its rows server-side, in rank order,
+        // with a clean title on each book anchor — parse those first. The
+        // JSON-LD ItemList and __NEXT_DATA__ stay as fallbacks for the mobile
+        // layout / future markup changes.
+        val doc = Jsoup.parse(body, response.request.url.toString())
+        val books = parseBookList(doc)
+            .ifEmpty { rankedFromJsonLd(body) }
+            .ifEmpty { booksFromNextData(body) }
         captureRankApiQuery(body)
         return paginate(seen, requestedPage(response), books)
     }
@@ -284,7 +317,10 @@ class WebNovel : HttpSource(), WebViewLoginSource {
     /** Best-effort title from a `/book/<slug>_<id>` URL when no better source. */
     private fun titleFromBookUrl(url: String): String {
         val slug = url.substringBefore('?').substringAfterLast("/book/").substringBeforeLast('_')
-        return runCatching { java.net.URLDecoder.decode(slug, "UTF-8") }.getOrDefault(slug)
+        val decoded = runCatching { java.net.URLDecoder.decode(slug, "UTF-8") }.getOrDefault(slug)
+        // Ranking JSON-LD urls keep HTML entities in the slug (alpha&apos;s-…),
+        // so unescape before title-casing or the entity leaks into the title.
+        return Parser.unescapeEntities(decoded, false)
             .split('-').filter { it.isNotBlank() }
             .joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
             .ifBlank { "Webnovel book" }
@@ -831,6 +867,13 @@ class WebNovel : HttpSource(), WebViewLoginSource {
         // Webnovel's mobile browse endpoints.
         private const val RANKING_URL =
             "https://m.webnovel.com/ranking/novel/bi_annual/power_rank"
+
+        // Ranking section codes (also reused by the advanced search's `sex`).
+        private const val SEX_MALE = 1
+        private const val SEX_FEMALE = 2
+
+        // Preference: which lead the Popular ranking shows.
+        private const val PREF_FEMALE_RANKING = "popular_female_lead"
         private const val RANKING_API =
             "https://m.webnovel.com/go/pcm/category/getRankList"
         private const val SEARCH_API =
