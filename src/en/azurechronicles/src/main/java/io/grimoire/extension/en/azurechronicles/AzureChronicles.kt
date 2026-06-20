@@ -48,7 +48,6 @@ import java.io.IOException
  * required ajax nonce are scraped from the archive page on first filter open.
  */
 @SourceInfo(
-    id = 10L,
     name = "Azure Chronicles",
     lang = "en",
     baseUrl = "https://azurechronicles.com",
@@ -57,7 +56,6 @@ import java.io.IOException
 )
 class AzureChronicles : HttpSource(), WebViewLoginSource {
 
-    override val id = 10L
     override val name = "Azure Chronicles"
     override val lang = "en"
     override val baseUrl = "https://azurechronicles.com"

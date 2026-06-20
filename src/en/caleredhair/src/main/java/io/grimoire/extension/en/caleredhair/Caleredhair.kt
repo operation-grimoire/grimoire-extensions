@@ -9,7 +9,6 @@ import io.grimoire.extensions.lib.theme.PatreonSource
  * behaviour lives in [PatreonSource]; this only pins the campaign id.
  */
 @SourceInfo(
-    id = 11L,
     name = "Cale",
     lang = "en",
     baseUrl = "https://www.patreon.com",
@@ -18,7 +17,6 @@ import io.grimoire.extensions.lib.theme.PatreonSource
 )
 class Caleredhair : PatreonSource() {
 
-    override val id = 11L
     override val name = "Cale"
     override val lang = "en"
 

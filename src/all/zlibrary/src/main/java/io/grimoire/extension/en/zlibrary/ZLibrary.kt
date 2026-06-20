@@ -52,7 +52,6 @@ import java.io.IOException
  * live responses without touching the rest of the source.
  */
 @SourceInfo(
-    id = 6L,
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.im",
@@ -61,7 +60,6 @@ import java.io.IOException
 class ZLibrary :
     HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource, WebViewLoginSource {
 
-    override val id = 6L
     override val name = "Z-Library"
     override val lang = "all"
 
