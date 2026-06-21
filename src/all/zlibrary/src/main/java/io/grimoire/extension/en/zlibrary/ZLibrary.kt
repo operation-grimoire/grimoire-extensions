@@ -55,7 +55,7 @@ import java.io.IOException
     name = "Z-Library",
     lang = "all",
     baseUrl = "https://z-library.im",
-    versionCode = 24,
+    versionCode = 25,
 )
 class ZLibrary :
     HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource, WebViewLoginSource {
@@ -364,7 +364,13 @@ class ZLibrary :
                 "Z-Library: couldn't load the book page — Cloudflare protection " +
                     "on the mirror could not be cleared. Try again in a moment.",
             )
-        val downloadHref = resolveDownloadHref(Jsoup.parse(bookHtml, bookUrl))
+        // The real download link is NOT the anchor's href — that's a decoy token
+        // that always answers /dl with 204 No Content (anti-scraping). The working
+        // token is split across a JS array in an inline click handler and only
+        // assembled at click time; assemble it ourselves. Fall back to the anchor
+        // href for older markup.
+        val downloadHref = realDownloadHref(bookHtml)
+            ?: resolveDownloadHref(Jsoup.parse(bookHtml, bookUrl))
             ?: throw IOException(
                 "Z-Library: no EPUB download link found. Sign in via the source's " +
                     "account login, or the daily download limit may have been reached.",
@@ -424,6 +430,18 @@ class ZLibrary :
                 }
                 if (resp.code == 503 || resp.code == 403) {
                     return DlResult.Retry("blocked by Cloudflare (HTTP ${resp.code})")
+                }
+                // A 204 No Content here means the token was refused even though we
+                // assembled the real one (see realDownloadHref) — typically the
+                // daily download limit, or the book needs a signed-in account.
+                if (resp.code == 204 ||
+                    (resp.isSuccessful && resp.body?.contentLength() == 0L)
+                ) {
+                    return DlResult.Fatal(
+                        "no file returned (HTTP ${resp.code}) — sign in via the " +
+                            "source's account login, or the daily download limit may " +
+                            "have been reached",
+                    )
                 }
                 if (!isHtml) {
                     return DlResult.Retry("download failed (HTTP ${resp.code})")
@@ -499,6 +517,34 @@ class ZLibrary :
 
     private fun absolute(base: String, href: String): String =
         if (href.startsWith("http")) href else resolveAgainst(base, href)
+
+    /**
+     * The working download path, reconstructed from the inline click handler the
+     * site attaches to the download button:
+     *
+     * ```
+     * a.addDownloadedBook ... addEventListener('click', function(event){
+     *     event.preventDefault();
+     *     const location = ["/dl","/nK","71b","7A1","9o"], split='';
+     *     window.location.href = location.join(split);
+     * })
+     * ```
+     *
+     * The anchor's own `href` is a decoy that always returns 204; only the token
+     * assembled here (`location.join(split)`) hits the real /dl that 302-redirects
+     * to the file CDN. Returns null when the handler isn't present (older markup).
+     */
+    private fun realDownloadHref(html: String): String? {
+        val block = Regex(
+            "addDownloadedBook'\\)\\.addEventListener\\('click'[\\s\\S]*?location\\.join\\(split\\)",
+        ).find(html)?.value ?: return null
+        val arr = Regex("location\\s*=\\s*\\[([^\\]]*)]").find(block)?.groupValues?.get(1) ?: return null
+        val split = Regex("split\\s*=\\s*'([^']*)'").find(block)?.groupValues?.get(1) ?: ""
+        val parts = Regex("\"((?:\\\\.|[^\"\\\\])*)\"").findAll(arr)
+            .map { it.groupValues[1].replace("\\/", "/") }
+            .toList()
+        return parts.joinToString(split).takeIf { it.startsWith("/dl/") }
+    }
 
     private fun fetchWithRetry(url: String): String? {
         repeat(MAX_RETRIES) { attempt ->
