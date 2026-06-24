@@ -1,6 +1,6 @@
 package io.grimoire.extension.en.foxaholic
 
-import io.grimoire.api.model.NovelStatus
+import io.grimoire.api.model.novel.NovelStatus
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -25,7 +25,7 @@ class FoxaholicTest {
 
     @Test
     fun `real page — translation Active drives status even with Completed novel`() {
-        assertEquals(NovelStatus.ONGOING, source.novelDetailsFromDocument(realPage).status)
+        assertEquals(NovelStatus.ONGOING, source.novelFromDocument(realPage).status)
     }
 
     @Test
@@ -61,43 +61,43 @@ class FoxaholicTest {
     @Test
     fun `status — active translation overrides completed novel`() {
         val doc = sidebar(translation = "Active", novel = "Completed")
-        assertEquals(NovelStatus.ONGOING, source.novelDetailsFromDocument(doc).status)
+        assertEquals(NovelStatus.ONGOING, source.novelFromDocument(doc).status)
     }
 
     @Test
     fun `status — dropped translation overrides ongoing novel`() {
         val doc = sidebar(translation = "Dropped", novel = "OnGoing")
-        assertEquals(NovelStatus.CANCELLED, source.novelDetailsFromDocument(doc).status)
+        assertEquals(NovelStatus.CANCELLED, source.novelFromDocument(doc).status)
     }
 
     @Test
     fun `status — teaser translation maps to hiatus`() {
         val doc = sidebar(translation = "Teaser", novel = "OnGoing")
-        assertEquals(NovelStatus.HIATUS, source.novelDetailsFromDocument(doc).status)
+        assertEquals(NovelStatus.HIATUS, source.novelFromDocument(doc).status)
     }
 
     @Test
     fun `status — finished translation maps to completed`() {
         val doc = sidebar(translation = "Finished", novel = "Completed")
-        assertEquals(NovelStatus.COMPLETED, source.novelDetailsFromDocument(doc).status)
+        assertEquals(NovelStatus.COMPLETED, source.novelFromDocument(doc).status)
     }
 
     @Test
     fun `status — falls back to novel field when translation is absent`() {
         val doc = sidebar(translation = null, novel = "Completed")
-        assertEquals(NovelStatus.COMPLETED, source.novelDetailsFromDocument(doc).status)
+        assertEquals(NovelStatus.COMPLETED, source.novelFromDocument(doc).status)
     }
 
     @Test
     fun `status — falls back to novel field for unrecognized translation value`() {
         val doc = sidebar(translation = "Pending", novel = "OnGoing")
-        assertEquals(NovelStatus.ONGOING, source.novelDetailsFromDocument(doc).status)
+        assertEquals(NovelStatus.ONGOING, source.novelFromDocument(doc).status)
     }
 
     @Test
     fun `status — no fields parses as unknown`() {
         val doc = Jsoup.parse("<html><body></body></html>")
-        assertEquals(NovelStatus.UNKNOWN, source.novelDetailsFromDocument(doc).status)
+        assertEquals(NovelStatus.UNKNOWN, source.novelFromDocument(doc).status)
     }
 
     @Test

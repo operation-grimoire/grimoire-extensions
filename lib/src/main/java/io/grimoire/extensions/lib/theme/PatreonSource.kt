@@ -1,19 +1,24 @@
 package io.grimoire.extensions.lib.theme
 
 import android.webkit.CookieManager
-import io.grimoire.api.model.Chapter
-import io.grimoire.api.model.Filter
-import io.grimoire.api.model.Novel
-import io.grimoire.api.model.NovelPage
-import io.grimoire.api.model.NovelStatus
-import io.grimoire.api.network.HttpSource
-import io.grimoire.api.network.richHtml
-import io.grimoire.api.source.WebViewLoginSource
+import io.grimoire.api.model.novel.Chapter
+import io.grimoire.api.model.novel.Novel
+import io.grimoire.api.model.novel.NovelPage
+import io.grimoire.api.model.novel.NovelStatus
+import io.grimoire.api.model.novel.PageContent
+import io.grimoire.api.source.feature.LatestSource
+import io.grimoire.api.source.feature.PopularSource
+import io.grimoire.api.source.feature.SearchSource
+import io.grimoire.api.source.feature.WebViewLoginSource
+import io.grimoire.api.source.http.HttpSource
+import io.grimoire.api.source.web.ChapterListSource
+import io.grimoire.api.source.web.PageListSource
+import io.grimoire.api.model.filter.Filter
+import io.grimoire.api.util.richHtml
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
 import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
@@ -25,93 +30,104 @@ import java.util.TimeZone
 
 /**
  * Base class for a single Patreon creator (campaign), read entirely through
- * Patreon's public JSON:API (`/api/...`). Every creator shares the identical
- * platform, so a concrete source only supplies [campaignId] plus its `id`,
- * `name` and `lang`.
+ * Patreon's public JSON:API (`/api/...`). A concrete source supplies [campaignId]
+ * plus its `name` and `lang`.
  *
- * The content model maps onto Patreon as:
- *
- *  - **Novel** = a Patreon **collection** (the creator's per-series grouping).
- *    `GET /api/campaigns/{id}?include=collections` returns every collection in
- *    one response (title, post count, description, cover), so browsing/searching
- *    needs no pagination — the whole catalogue arrives at once and is filtered
- *    or re-sorted client-side.
- *  - **Chapter** = a **post** in that collection.
- *    `GET /api/posts?filter[campaign_id]=&filter[collection_id]=&sort=published_at`
- *    lists them oldest-first; the endpoint is cursor-paginated, so
- *    [chapterListParse] follows `links.next` until the collection is exhausted.
- *  - **Page content** = a post's body. Patreon delivers it as a ProseMirror
- *    document in `content_json_string` (and, for some sessions, pre-rendered
- *    HTML in `content`); [pageListParse] prefers the HTML and falls back to
- *    converting the ProseMirror nodes.
- *
- * Most posts are paywalled: an anonymous request sees a post's metadata but its
- * body only materialises when `current_user_can_view` is true, which requires a
- * signed-in (free- or paid-tier) Patreon session. Login is delegated to a
- * WebView ([WebViewLoginSource]); the resulting `session_id` cookie (and any
- * Cloudflare clearance) replays on the API calls via the shared cookie jar so
- * viewable chapters read.
+ * Content model: a **Novel** is a Patreon collection, a **Chapter** is a post, and
+ * page content is a post body (pre-rendered HTML when served, else the ProseMirror
+ * document). Most posts are paywalled — [WebViewLoginSource] signs in so the
+ * `session_id` cookie replays on the API calls.
  */
-abstract class PatreonSource : HttpSource(), WebViewLoginSource {
+abstract class PatreonSource :
+    HttpSource(),
+    PopularSource,
+    LatestSource,
+    SearchSource,
+    ChapterListSource,
+    PageListSource,
+    WebViewLoginSource {
 
     /** Patreon numeric campaign id backing this creator (e.g. "13760222"). */
     protected abstract val campaignId: String
 
     override val baseUrl: String get() = "https://www.patreon.com"
 
-    // --- Listings -------------------------------------------------------------
-    //
-    // Popular, Latest and Search all read the same single collections response;
-    // they differ only in client-side ordering/filtering. The requested page is
-    // carried in the URL fragment (never sent to the server) so the parser can
-    // end pagination after the first — the catalogue is un-paginated.
+    // --- Listings: all read the same single collections response, ordered/filtered client-side.
 
-    override fun popularNovelsRequest(page: Int): Request = collectionsRequest(page)
+    override suspend fun getPopularNovels(page: Int): List<Novel> = withContext(Dispatchers.IO) {
+        if (page != 1) emptyList()
+        else collections().sortedByDescending { it.numPosts }.map { it.toNovel() }
+    }
 
-    override suspend fun popularNovelsParse(response: Response): List<Novel> =
-        collectionsPage(response) { sortedByDescending { it.numPosts } }
+    override suspend fun getLatestUpdates(page: Int): List<Novel> = withContext(Dispatchers.IO) {
+        if (page != 1) emptyList()
+        else collections().sortedByDescending { it.editedAt }.map { it.toNovel() }
+    }
 
-    override fun latestUpdatesRequest(page: Int): Request = collectionsRequest(page)
+    override suspend fun searchNovels(query: String, page: Int, filters: List<Filter<*>>): List<Novel> =
+        withContext(Dispatchers.IO) {
+            if (page != 1) {
+                emptyList()
+            } else {
+                val q = query.trim()
+                collections()
+                    .filter { q.isEmpty() || it.title.contains(q, ignoreCase = true) }
+                    .map { it.toNovel() }
+            }
+        }
 
-    override suspend fun latestUpdatesParse(response: Response): List<Novel> =
-        collectionsPage(response) { sortedByDescending { it.editedAt } }
+    override suspend fun getNovelDetails(novel: Novel): Novel = withContext(Dispatchers.IO) {
+        val wantId = collectionId(novel.url)
+        collections().firstOrNull { it.id == wantId }?.toNovel()?.copy(initialized = true)
+            ?: throw IOException("Patreon: collection $wantId not found in this campaign.")
+    }
 
-    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request =
-        collectionsRequest(page, query)
-
-    override suspend fun searchNovelsParse(response: Response): List<Novel> {
-        val q = response.request.url.queryParameter(QUERY_MARKER).orEmpty().trim()
-        return collectionsPage(response) {
-            if (q.isEmpty()) this else filter { it.title.contains(q, ignoreCase = true) }
+    override suspend fun getChapterList(novel: Novel): List<Chapter> = withContext(Dispatchers.IO) {
+        val posts = mutableListOf<JSONObject>()
+        var root = jsonBody(get(chapterListUrl(novel)))
+        var guard = 0
+        while (true) {
+            root.optJSONArray("data")?.objects()?.let { posts.addAll(it) }
+            val next = root.optJSONObject("links")?.optString("next")?.takeIf { it.isNotEmpty() } ?: break
+            if (++guard > MAX_PAGES) break
+            root = jsonBody(get(next))
+        }
+        // sort=published_at lists oldest-first, i.e. the natural reading order.
+        posts.mapIndexedNotNull { i, post ->
+            val id = post.optString("id").trim().takeIf { it.isNotEmpty() } ?: return@mapIndexedNotNull null
+            val attrs = post.optJSONObject("attributes") ?: JSONObject()
+            Chapter(
+                url = contentUrl(id),
+                name = attrs.optString("title").trim().ifEmpty { "Post $id" },
+                uploadDate = parseDate(attrs.optString("published_at")),
+                chapterNumber = (i + 1).toFloat(),
+                locked = !attrs.optBoolean("current_user_can_view", false),
+            )
         }
     }
 
-    override fun getFilterList(): List<Filter<*>> = emptyList()
+    override suspend fun getPageList(chapter: Chapter): List<NovelPage> = withContext(Dispatchers.IO) {
+        val attrs = jsonBody(get(chapter.url)).optJSONObject("data")?.optJSONObject("attributes")
+            ?: throw IOException("Patreon: unexpected post response.")
+        val canView = attrs.optBoolean("current_user_can_view", false)
 
-    // `include=collections` on the campaign returns the full collection set in
-    // `included`. QUERY_MARKER (a harmless extra query param Patreon ignores)
-    // carries the search text; the fragment carries the page so parsing can stop.
-    private fun collectionsRequest(page: Int, query: String? = null): Request {
-        val b = apiUrl("campaigns/$campaignId").addQueryParameter("include", "collections")
-        if (!query.isNullOrBlank()) b.addQueryParameter(QUERY_MARKER, query)
-        return GET(b.build().toString() + "#p=$page")
-    }
+        val html = attrs.optString("content").takeIf { it.isNotBlank() && it != "null" }
+        val pages = if (html != null) parseHtml(html) else parseProseMirror(attrs.optString("content_json_string"))
 
-    // Applies [order] to the parsed collections, but only on the first page —
-    // later pages return empty so the host stops requesting more.
-    private inline fun collectionsPage(
-        response: Response,
-        order: List<PatreonCollection>.() -> List<PatreonCollection>,
-    ): List<Novel> {
-        if ((response.request.url.fragment ?: "p=1").substringAfter("p=") != "1") {
-            response.close()
-            return emptyList()
+        if (pages.isEmpty()) {
+            throw IOException(
+                if (!canView) "Patreon: this chapter is locked — sign in with an account that can view it."
+                else "Patreon: this chapter has no readable text.",
+            )
         }
-        return parseCollections(response).order().map { it.toNovel() }
+        pages
     }
 
-    private fun parseCollections(response: Response): List<PatreonCollection> {
-        val included = jsonBody(response).optJSONArray("included") ?: return emptyList()
+    // --- Collections fetch/parse ---------------------------------------------
+
+    private suspend fun collections(): List<PatreonCollection> {
+        val url = apiUrl("campaigns/$campaignId").addQueryParameter("include", "collections").build().toString()
+        val included = jsonBody(get(url)).optJSONArray("included") ?: return emptyList()
         return included.objects()
             .filter { it.optString("type") == "collection" }
             .mapNotNull { obj ->
@@ -138,111 +154,36 @@ abstract class PatreonSource : HttpSource(), WebViewLoginSource {
     )
 
     private fun PatreonCollection.toNovel() = Novel(
-        // A collection has no canonical web URL we need to fetch; encode the id
-        // so novelDetails/chapterList can rebuild the API calls. See collectionId().
         url = "$baseUrl/collection/$id",
         title = title,
+        language = lang,
         thumbnailUrl = thumbnailUrl,
         description = description,
         status = statusFromTitle(title),
     )
 
-    // --- Novel details --------------------------------------------------------
-    //
-    // Details come from the same collections response (cheap, single request);
-    // the target id rides along in the request fragment.
-
-    override fun novelDetailsRequest(novel: Novel): Request =
-        GET(apiUrl("campaigns/$campaignId").addQueryParameter("include", "collections")
-            .build().toString() + "#c=${collectionId(novel.url)}")
-
-    override suspend fun novelDetailsParse(response: Response): Novel {
-        val wantId = (response.request.url.fragment ?: "").substringAfter("c=", "")
-        val match = parseCollections(response).firstOrNull { it.id == wantId }
-            ?: throw IOException("Patreon: collection $wantId not found in this campaign.")
-        return match.toNovel().copy(initialized = true)
-    }
-
-    // --- Chapter list ---------------------------------------------------------
-
-    override fun chapterListRequest(novel: Novel): Request {
-        val url = apiUrl("posts")
+    private fun chapterListUrl(novel: Novel): String =
+        apiUrl("posts")
             .addQueryParameter("filter[campaign_id]", campaignId)
             .addQueryParameter("filter[collection_id]", collectionId(novel.url))
             .addQueryParameter("sort", "published_at")
             .addQueryParameter("fields[post]", "title,published_at,url,current_user_can_view")
             .addQueryParameter("page[count]", PAGE_SIZE.toString())
-            .build()
-        return GET(url.toString())
-    }
+            .build().toString()
 
-    override suspend fun chapterListParse(response: Response): List<Chapter> {
-        val posts = mutableListOf<JSONObject>()
-        var root = jsonBody(response)
-        var guard = 0
-        while (true) {
-            root.optJSONArray("data")?.objects()?.let { posts.addAll(it) }
-            val next = root.optJSONObject("links")?.optString("next")?.takeIf { it.isNotEmpty() }
-                ?: break
-            if (++guard > MAX_PAGES) break
-            root = withContext(Dispatchers.IO) {
-                client.newCall(GET(next)).execute().use { jsonBody(it) }
-            }
-        }
-        // sort=published_at lists oldest-first, i.e. the natural reading order.
-        return posts.mapIndexedNotNull { i, post ->
-            val id = post.optString("id").trim().takeIf { it.isNotEmpty() } ?: return@mapIndexedNotNull null
-            val attrs = post.optJSONObject("attributes") ?: JSONObject()
-            val title = attrs.optString("title").trim().ifEmpty { "Post $id" }
-            Chapter(
-                url = contentUrl(id),
-                name = title,
-                uploadDate = parseDate(attrs.optString("published_at")),
-                chapterNumber = (i + 1).toFloat(),
-                locked = !attrs.optBoolean("current_user_can_view", false),
-            )
-        }
-    }
-
-    // --- Chapter content ------------------------------------------------------
-
-    override suspend fun pageListParse(response: Response): List<NovelPage> {
-        val attrs = jsonBody(response).optJSONObject("data")?.optJSONObject("attributes")
-            ?: throw IOException("Patreon: unexpected post response.")
-        val canView = attrs.optBoolean("current_user_can_view", false)
-
-        // Prefer pre-rendered HTML when the session is served it; otherwise build
-        // the body from the ProseMirror document Patreon ships in every response.
-        val html = attrs.optString("content").takeIf { it.isNotBlank() && it != "null" }
-        val pages = if (html != null) parseHtml(html) else parseProseMirror(attrs.optString("content_json_string"))
-
-        if (pages.isEmpty()) {
-            throw IOException(
-                if (!canView) {
-                    "Patreon: this chapter is locked — sign in with an account that can view it."
-                } else {
-                    "Patreon: this chapter has no readable text."
-                },
-            )
-        }
-        return pages
-    }
+    // --- Page content parsing -------------------------------------------------
 
     private fun parseHtml(html: String): List<NovelPage> {
         val body = Jsoup.parseBodyFragment(html, baseUrl).body()
         body.select("script, style").remove()
-        return body.select("p").mapNotNull { p ->
-            val text = p.text().trim()
-            if (text.isEmpty()) null else p
-        }.mapIndexed { i, p ->
-            val text = p.text()
-            NovelPage(index = i, text = text, formattedText = p.richHtml().takeIf { it != text })
-        }
+        return body.select("p")
+            .filter { it.text().trim().isNotEmpty() }
+            .mapIndexed { i, p ->
+                val text = p.text()
+                NovelPage(i, PageContent.Text(text, p.richHtml().takeIf { it != text }))
+            }
     }
 
-    // ProseMirror doc: doc -> paragraph -> (text | hardBreak). Text nodes carry
-    // inline `marks` (bold/italic/underline/link); render those into the limited
-    // HTML subset the reader supports, and drop wholly empty paragraphs.
     private fun parseProseMirror(raw: String): List<NovelPage> {
         if (raw.isBlank() || raw == "null") return emptyList()
         val doc = runCatching { JSONObject(raw) }.getOrNull() ?: return emptyList()
@@ -255,13 +196,7 @@ abstract class PatreonSource : HttpSource(), WebViewLoginSource {
             val text = plain.toString().trim()
             if (text.isEmpty()) continue
             val html = rich.toString().trim()
-            pages.add(
-                NovelPage(
-                    index = pages.size,
-                    text = text,
-                    formattedText = html.takeIf { it != text },
-                ),
-            )
+            pages.add(NovelPage(pages.size, PageContent.Text(text, html.takeIf { it != text })))
         }
         return pages
     }
@@ -305,14 +240,8 @@ abstract class PatreonSource : HttpSource(), WebViewLoginSource {
     // --- WebViewLoginSource ---------------------------------------------------
 
     override val loginUrl: String get() = "$baseUrl/login"
-
-    // A successful sign-in redirects to the logged-in home feed. Match that
-    // rather than baseUrl itself — baseUrl is a substring of the /login page, so
-    // the host could otherwise treat login as complete the instant it opens.
     override val loginSuccessUrl: String get() = "$baseUrl/home"
 
-    // Patreon sets `session_id` only once authenticated — an anonymous visit
-    // sets just Cloudflare cookies (__cf_bm / _cfuvid).
     override suspend fun isLoggedIn(): Boolean = withContext(Dispatchers.IO) {
         CookieManager.getInstance().getCookie(baseUrl).orEmpty()
             .split(';').map { it.trim() }
@@ -357,8 +286,6 @@ abstract class PatreonSource : HttpSource(), WebViewLoginSource {
     private fun escapeHtml(s: String): String =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    // Patreon timestamps are ISO-8601 with an offset, e.g.
-    // "2026-06-01T18:12:33.000+00:00". Parse leniently; 0L when absent/unknown.
     private fun parseDate(raw: String): Long {
         val value = raw.trim().takeIf { it.isNotEmpty() && it != "null" } ?: return 0L
         for (pattern in DATE_PATTERNS) {
@@ -371,7 +298,6 @@ abstract class PatreonSource : HttpSource(), WebViewLoginSource {
 
     private companion object {
         const val JSON_API_VERSION = "1.0"
-        const val QUERY_MARKER = "q"
         const val PAGE_SIZE = 40
         const val MAX_PAGES = 500
 

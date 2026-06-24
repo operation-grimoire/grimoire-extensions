@@ -1,7 +1,9 @@
 package io.grimoire.extension.en.royalroad
 
-import io.grimoire.api.model.Filter
-import io.grimoire.api.model.NovelStatus
+import io.grimoire.api.model.filter.Filter
+import io.grimoire.api.model.novel.NovelStatus
+import io.grimoire.api.model.novel.PageContent
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -215,9 +217,9 @@ class RoyalRoadTest {
             ),
         )
         assertEquals(2, pages.size)
-        assertEquals("Zorian opened his eyes.", pages[0].text)
-        assertEquals("He sat up in bed.", pages[1].text)
-        assertTrue(pages.none { it.text.contains("official site") })
+        assertEquals("Zorian opened his eyes.", (pages[0].content as PageContent.Text).text)
+        assertEquals("He sat up in bed.", (pages[1].content as PageContent.Text).text)
+        assertTrue(pages.none { (it.content as? PageContent.Text)?.text?.contains("official site") == true })
     }
 
     @Test
@@ -234,7 +236,10 @@ class RoyalRoadTest {
                 """.trimIndent(),
             ),
         )
-        assertEquals(listOf("Real opening line.", "Real closing line."), pages.map { it.text })
+        assertEquals(
+            listOf("Real opening line.", "Real closing line."),
+            pages.map { (it.content as PageContent.Text).text },
+        )
     }
 
     @Test
@@ -251,11 +256,11 @@ class RoyalRoadTest {
             ),
         )
         assertEquals(3, pages.size)
-        assertEquals("Before the break.", pages[0].text)
-        assertTrue(pages[1].isSeparator)
-        assertEquals("", pages[1].text)
-        assertEquals("A whispered thought.", pages[2].text)
-        assertEquals("<i>A whispered thought.</i>", pages[2].formattedText)
+        assertEquals("Before the break.", (pages[0].content as PageContent.Text).text)
+        assertTrue(pages[1].content is PageContent.Separator)
+        val thought = pages[2].content as PageContent.Text
+        assertEquals("A whispered thought.", thought.text)
+        assertEquals("<i>A whispered thought.</i>", thought.html)
     }
 
     @Test
@@ -269,8 +274,10 @@ class RoyalRoadTest {
                 """.trimIndent(),
             ),
         )
-        assertEquals("https://www.royalroadcdn.com/illustration.jpg", pages.single().imageUrl)
-        assertEquals("", pages.single().text)
+        assertEquals(
+            "https://www.royalroadcdn.com/illustration.jpg",
+            (pages.single().content as PageContent.Image).url,
+        )
     }
 
     // --- Filters ------------------------------------------------------------
@@ -315,7 +322,7 @@ class RoyalRoadTest {
         val warnings = filters.filterIsInstance<RoyalRoad.TagGroup>().first { it.name == "Content Warnings" }
         warnings.set("ai_generated", Filter.TriState.STATE_EXCLUDE)
 
-        val url = source.searchNovelsRequest("dungeon", 2, filters).url
+        val url = source.searchUrl("dungeon", 2, filters).toHttpUrl()
         assertEquals(listOf("litrpg", "magic"), url.queryParameterValues("tagsAdd"))
         assertEquals(listOf("harem", "ai_generated"), url.queryParameterValues("tagsRemove"))
         assertEquals("dungeon", url.queryParameter("title"))
@@ -333,7 +340,7 @@ class RoyalRoadTest {
         named(filters, "Min pages").let { (it as Filter.Text).state = "200" }
         named(filters, "Author").let { (it as Filter.Text).state = "  nobody103  " }
 
-        val url = source.searchNovelsRequest("", 1, filters).url
+        val url = source.searchUrl("", 1, filters).toHttpUrl()
         assertEquals("ONGOING", url.queryParameter("status"))
         assertEquals("original", url.queryParameter("type"))
         assertEquals("rating", url.queryParameter("orderBy"))
@@ -346,7 +353,7 @@ class RoyalRoadTest {
 
     @Test
     fun `untouched filters omit ALL-valued selects and blank text`() {
-        val url = source.searchNovelsRequest("world", 1, source.getFilterList()).url
+        val url = source.searchUrl("world", 1, source.getFilterList()).toHttpUrl()
         // Status/Type default to "ALL" and are dropped; no tags selected.
         assertNull(url.queryParameter("status"))
         assertNull(url.queryParameter("type"))

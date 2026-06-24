@@ -1,6 +1,7 @@
 package io.grimoire.extension.en.lightnovelstranslations
 
-import io.grimoire.api.model.NovelPage
+import io.grimoire.api.model.novel.NovelPage
+import io.grimoire.api.model.novel.PageContent
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -9,6 +10,12 @@ import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+
+// Bridge the new sealed PageContent back to the flat fields these tests assert on.
+private val NovelPage.text: String get() = (content as? PageContent.Text)?.text ?: ""
+private val NovelPage.formattedText: String? get() = (content as? PageContent.Text)?.html
+private val NovelPage.isSeparator: Boolean get() = content is PageContent.Separator
+private val NovelPage.imageUrl: String? get() = (content as? PageContent.Image)?.url
 
 class LightNovelsTranslationsTest {
 

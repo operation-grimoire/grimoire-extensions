@@ -88,8 +88,10 @@ should ship to users.
 
 PR builds and releases run via reusable workflows hosted in
 [`operation-grimoire/extensions-ci`](https://github.com/Operation-Grimoire/extensions-ci),
-pinned to `@v1`. `.github/workflows/pr-build.yml` and `release.yml` are thin
+pinned to `@v2`. `.github/workflows/pr-build.yml` and `release.yml` are thin
 stubs that delegate; the Python scripts that detect changed extensions and
 generate `index.json` live in extensions-ci. To change build behavior shared
-across all sibling repos, edit extensions-ci and cut a new `v1.x.y`; to change
-repo-specific behavior, edit the stubs here.
+across all sibling repos, edit extensions-ci and move the `v2` tag (or cut a new
+`v2.x.y`); to change repo-specific behavior, edit the stubs here. `index.json`
+carries each source's `adultContent` rating and `novelUpdatesGroups`, emitted by
+the generator from `@SourceInfo`.

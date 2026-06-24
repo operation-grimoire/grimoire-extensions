@@ -1,18 +1,27 @@
 package io.grimoire.extension.en.webnovel
 
 import android.webkit.CookieManager
-import io.grimoire.api.model.Chapter
-import io.grimoire.api.model.Filter
-import io.grimoire.api.model.Novel
-import io.grimoire.api.model.NovelPage
-import io.grimoire.api.model.NovelStatus
-import io.grimoire.api.network.HttpSource
-import io.grimoire.api.network.richDescription
-import io.grimoire.api.network.richHtml
-import io.grimoire.api.source.ConfigurableSource
+import io.grimoire.api.model.filter.Filter
+import io.grimoire.api.model.lang.Language
+import io.grimoire.api.model.novel.Chapter
+import io.grimoire.api.model.novel.Novel
+import io.grimoire.api.model.novel.NovelPage
+import io.grimoire.api.model.novel.NovelStatus
+import io.grimoire.api.model.novel.PageContent
+import io.grimoire.api.model.pref.PrefValue
+import io.grimoire.api.model.pref.SourcePreference
 import io.grimoire.api.source.SourceInfo
-import io.grimoire.api.source.SourcePreference
-import io.grimoire.api.source.WebViewLoginSource
+import io.grimoire.api.source.feature.ConfigurableSource
+import io.grimoire.api.source.feature.FilterSource
+import io.grimoire.api.source.feature.LatestSource
+import io.grimoire.api.source.feature.PopularSource
+import io.grimoire.api.source.feature.SearchSource
+import io.grimoire.api.source.feature.WebViewLoginSource
+import io.grimoire.api.source.http.HttpSource
+import io.grimoire.api.source.web.ChapterListSource
+import io.grimoire.api.source.web.PageListSource
+import io.grimoire.api.util.richDescription
+import io.grimoire.api.util.richHtml
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -43,15 +52,24 @@ import java.net.URLEncoder
  */
 @SourceInfo(
     name = "Webnovel",
-    lang = "en",
+    lang = Language.EN,
     baseUrl = "https://www.webnovel.com",
-    versionCode = 27,
+    versionCode = 28,
     novelUpdatesGroups = ["Webnovel"],
 )
-class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
+class WebNovel :
+    HttpSource(),
+    PopularSource,
+    LatestSource,
+    SearchSource,
+    FilterSource,
+    ChapterListSource,
+    PageListSource,
+    WebViewLoginSource,
+    ConfigurableSource {
 
     override val name = "Webnovel"
-    override val lang = "en"
+    override val lang = Language.EN
     override val baseUrl = "https://www.webnovel.com"
 
     // Which power-ranking section "Popular" shows. Defaults to the male-lead
@@ -71,8 +89,9 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
         ),
     )
 
-    override fun setPreferences(values: Map<String, String>) {
-        rankingSex = if (values[PREF_FEMALE_RANKING] == "true") SEX_FEMALE else SEX_MALE
+    override fun setPreferences(values: Map<String, PrefValue>) {
+        val female = (values[PREF_FEMALE_RANKING] as? PrefValue.Bool)?.value == true
+        rankingSex = if (female) SEX_FEMALE else SEX_MALE
     }
 
     // Book urls already returned for the current listing, so paging never
@@ -140,10 +159,23 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
 
     // --- Listings ------------------------------------------------------------
 
+    override suspend fun getPopularNovels(page: Int): List<Novel> = withContext(Dispatchers.IO) {
+        parseRanking(execute(popularNovelsRequest(page)), popularSeen)
+    }
+
+    override suspend fun getLatestUpdates(page: Int): List<Novel> = withContext(Dispatchers.IO) {
+        parseSearchListing(execute(GET("$LATEST_URL&pageIndex=$page")), latestSeen)
+    }
+
+    override suspend fun searchNovels(query: String, page: Int, filters: List<Filter<*>>): List<Novel> =
+        withContext(Dispatchers.IO) {
+            searchNovelsParse(execute(searchNovelsRequest(query, page, filters)))
+        }
+
     // Page 1 is the server-rendered ranking page. Webnovel ignores ?pageIndex
     // there for ordinary requests, so deeper pages are fetched from the
     // ranking's own scroll API, parameterised from page 1's __NEXT_DATA__.
-    override fun popularNovelsRequest(page: Int): Request {
+    private fun popularNovelsRequest(page: Int): Request {
         val query = rankApiQuery
         if (page <= 1 || query == null) {
             // The power ranking is split into a male-lead (sex=1) and
@@ -169,12 +201,9 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
             .build()
     }
 
-    override fun latestUpdatesRequest(page: Int): Request =
-        GET("$LATEST_URL&pageIndex=$page")
-
     // A bare query runs Webnovel's keyword search. Once a tag is set the
     // request switches to the advanced tag search, which ignores keywords.
-    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
+    private fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
         if (filters.none(::filterActive)) {
             val keywords = query.trim()
             // The advanced search needs a tag and the keyword search needs a
@@ -214,9 +243,6 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
         return apiRequest("$SEARCH_API?$params")
     }
 
-    override suspend fun popularNovelsParse(response: Response): List<Novel> =
-        parseRanking(response, popularSeen)
-
     private fun parseRanking(response: Response, seen: MutableSet<String>): List<Novel> {
         val body = response.bodyText()
         // Deeper pages are the JSON scroll API; page 1 is the rendered page.
@@ -247,7 +273,7 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
             if (id.isEmpty()) continue
             val title = item.optString("bookName").ifEmpty { item.optString("name") }.trim()
             if (title.length < 2) continue
-            out += Novel(url = "/book/$id", title = title, thumbnailUrl = coverUrl(id))
+            out += Novel(url = "/book/$id", title = title, language = lang, thumbnailUrl = coverUrl(id))
         }
         return out
     }
@@ -306,7 +332,7 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
                     ?.trim()?.takeIf { it.isNotEmpty() }
                     ?: titleFromBookUrl(bookUrl)
                 ranked += item.optInt("position", i + 1) to
-                    Novel(url = "/book/$id", title = title, thumbnailUrl = coverUrl(id))
+                    Novel(url = "/book/$id", title = title, language = lang, thumbnailUrl = coverUrl(id))
             }
         }
         return ranked.sortedBy { it.first }.map { it.second }.distinctBy { it.url }
@@ -325,10 +351,7 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
     }
 
 
-    override suspend fun latestUpdatesParse(response: Response): List<Novel> =
-        parseSearchListing(response, latestSeen)
-
-    override suspend fun searchNovelsParse(response: Response): List<Novel> {
+    private fun searchNovelsParse(response: Response): List<Novel> {
         val url = response.request.url.toString()
         // The advanced tag search returns JSON; keyword search returns a page.
         if (url.contains("get-search-list")) {
@@ -530,7 +553,7 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
                 card.selectFirst("h2, h3, h4, [class*=title], [class*=name]")?.text(),
                 anchor.selectFirst("img")?.attr("alt"),
             ).mapNotNull { it?.trim() }.firstOrNull { it.length >= 2 } ?: continue
-            out += Novel(url = "/book/$id", title = title, thumbnailUrl = coverUrl(id))
+            out += Novel(url = "/book/$id", title = title, language = lang, thumbnailUrl = coverUrl(id))
         }
         return out
     }
@@ -548,6 +571,7 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
             out += Novel(
                 url = "/book/$id",
                 title = title,
+                language = lang,
                 thumbnailUrl = coverUrl(id),
                 author = book.optString("authorName").trim().takeIf { it.isNotEmpty() },
                 description = book.optString("description").trim().takeIf { it.isNotEmpty() },
@@ -560,9 +584,11 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
 
     // The catalog page embeds the full book record (description, tags, score)
     // in its __NEXT_DATA__, so novel details are sourced from there.
-    override fun novelDetailsRequest(novel: Novel): Request = chapterListRequest(novel)
+    override suspend fun getNovelDetails(novel: Novel): Novel = withContext(Dispatchers.IO) {
+        novelDetailsParse(execute(chapterListRequest(novel)))
+    }
 
-    override suspend fun novelDetailsParse(response: Response): Novel {
+    private fun novelDetailsParse(response: Response): Novel {
         val html = response.bodyText()
         val pageUrl = response.request.url.toString()
         val id = bookId(pageUrl)
@@ -582,6 +608,7 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
                 url = "/book/$id",
                 title = book.optString("bookName").ifEmpty { book.optString("name") }.trim()
                     .ifEmpty { "Webnovel book" },
+                language = lang,
                 thumbnailUrl = coverUrl(id),
                 author = book.optString("authorName").trim().takeIf { it.isNotEmpty() },
                 description = book.optString("description").trim().takeIf { it.isNotEmpty() },
@@ -603,6 +630,7 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
             title = doc.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotEmpty() }
                 ?: meta("title")?.substringBefore(" - ")?.trim()
                 ?: "Webnovel book",
+            language = lang,
             thumbnailUrl = id?.let { coverUrl(it) } ?: meta("image"),
             author = doc.selectFirst("a[href*=/profile/], [class*=author] a")
                 ?.text()?.trim()?.removePrefix("Author:")?.trim()?.takeIf { it.isNotEmpty() },
@@ -621,14 +649,18 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
 
     // --- Chapter list --------------------------------------------------------
 
+    override suspend fun getChapterList(novel: Novel): List<Chapter> = withContext(Dispatchers.IO) {
+        chapterListParse(execute(chapterListRequest(novel)))
+    }
+
     // The book page does not list chapters; the dedicated catalog page does.
-    override fun chapterListRequest(novel: Novel): Request {
+    private fun chapterListRequest(novel: Novel): Request {
         val id = bookId(novel.url)
             ?: throw IOException("Webnovel: could not determine the book id")
         return GET("$baseUrl/book/$id/catalog")
     }
 
-    override suspend fun chapterListParse(response: Response): List<Chapter> {
+    private fun chapterListParse(response: Response): List<Chapter> {
         val html = response.bodyText()
         val url = response.request.url.toString()
         val doc = Jsoup.parse(html, url)
@@ -680,7 +712,11 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
 
     // --- Chapter content -----------------------------------------------------
 
-    override suspend fun pageListParse(response: Response): List<NovelPage> {
+    override suspend fun getPageList(chapter: Chapter): List<NovelPage> = withContext(Dispatchers.IO) {
+        pageListParse(execute(GET(resolveUrl(chapter.url))))
+    }
+
+    private fun pageListParse(response: Response): List<NovelPage> {
         val html = response.bodyText()
         val url = response.request.url.toString()
         val chapter = nextDataChapter(html, url)
@@ -706,7 +742,7 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
                 val text = body.text().trim()
                 if (text.isEmpty()) null else {
                     val formatted = body.richHtml().takeIf { it != text }
-                    NovelPage(index = i, text = text, formattedText = formatted)
+                    NovelPage(i, PageContent.Text(text, formatted))
                 }
             }
             if (pages.isNotEmpty()) return pages
@@ -722,7 +758,7 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
         if (scraped.isNotEmpty()) {
             return scraped.mapIndexed { i, (el, text) ->
                 val formatted = el.richHtml().takeIf { it != text }
-                NovelPage(index = i, text = text, formattedText = formatted)
+                NovelPage(i, PageContent.Text(text, formatted))
             }
         }
 
@@ -730,6 +766,9 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
     }
 
     // --- Helpers -------------------------------------------------------------
+
+    private suspend fun execute(request: Request): Response =
+        withContext(Dispatchers.IO) { client.newCall(request).execute() }
 
     private fun Response.bodyText(): String = body?.string().orEmpty()
 
@@ -746,9 +785,6 @@ class WebNovel : HttpSource(), WebViewLoginSource, ConfigurableSource {
             if (page <= 1) seen.clear()
             novels.filter { seen.add(it.url) }
         }
-
-    private fun Response.asJsoup(): Document =
-        Jsoup.parse(bodyText(), request.url.toString())
 
     /** Covers have a deterministic CDN URL keyed by book id. */
     private fun coverUrl(bookId: String): String =

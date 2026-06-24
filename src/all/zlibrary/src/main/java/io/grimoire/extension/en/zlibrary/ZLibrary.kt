@@ -1,20 +1,23 @@
 package io.grimoire.extension.en.zlibrary
 
 import android.webkit.CookieManager
-import io.grimoire.api.model.Chapter
-import io.grimoire.api.model.Filter
-import io.grimoire.api.model.Novel
-import io.grimoire.api.model.NovelPage
-import io.grimoire.api.model.NovelStatus
-import io.grimoire.api.network.HttpSource
-import io.grimoire.api.network.richDescription
-import io.grimoire.api.source.ConfigValidationResult
-import io.grimoire.api.source.ConfigurableSource
-import io.grimoire.api.source.EpubSource
-import io.grimoire.api.source.MultiLanguageSource
+import io.grimoire.api.model.filter.Filter
+import io.grimoire.api.model.lang.Language
+import io.grimoire.api.model.novel.Novel
+import io.grimoire.api.model.novel.NovelStatus
+import io.grimoire.api.model.pref.ConfigValidationResult
+import io.grimoire.api.model.pref.PrefValue
+import io.grimoire.api.model.pref.SourcePreference
 import io.grimoire.api.source.SourceInfo
-import io.grimoire.api.source.SourcePreference
-import io.grimoire.api.source.WebViewLoginSource
+import io.grimoire.api.source.epub.EpubSource
+import io.grimoire.api.source.feature.ConfigurableSource
+import io.grimoire.api.source.feature.LatestSource
+import io.grimoire.api.source.feature.MultiLanguageSource
+import io.grimoire.api.source.feature.PopularSource
+import io.grimoire.api.source.feature.SearchSource
+import io.grimoire.api.source.feature.WebViewLoginSource
+import io.grimoire.api.source.http.HttpSource
+import io.grimoire.api.util.richDescription
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -53,15 +56,22 @@ import java.io.IOException
  */
 @SourceInfo(
     name = "Z-Library",
-    lang = "all",
+    lang = Language.MULTI,
     baseUrl = "https://z-library.im",
-    versionCode = 25,
+    versionCode = 26,
 )
 class ZLibrary :
-    HttpSource(), ConfigurableSource, EpubSource, MultiLanguageSource, WebViewLoginSource {
+    HttpSource(),
+    PopularSource,
+    LatestSource,
+    SearchSource,
+    ConfigurableSource,
+    EpubSource,
+    MultiLanguageSource,
+    WebViewLoginSource {
 
     override val name = "Z-Library"
-    override val lang = "all"
+    override val lang = Language.MULTI
 
     // Single host for everything (shelf, /s/ search, /book details, /dl
     // downloads, /login). Z-Library rotates mirrors, so this is user-editable.
@@ -70,11 +80,11 @@ class ZLibrary :
     @Volatile
     private var mirror: String = defaultMirror
 
-    // Lowercased enabled content languages. Empty = no filter. Z-Library's
-    // search API ignores any language parameter (verified), so this is applied
-    // client-side by dropping non-matching results.
+    // Enabled content languages. Empty = no filter. Z-Library's search ignores
+    // any language parameter (verified), so this is applied client-side by
+    // dropping non-matching results.
     @Volatile
-    private var enabledLanguages: Set<String> = emptySet()
+    private var enabledLanguages: Set<Language> = emptySet()
 
     override val baseUrl: String
         get() = mirror
@@ -92,8 +102,8 @@ class ZLibrary :
         ),
     )
 
-    override fun setPreferences(values: Map<String, String>) {
-        mirror = values[PREF_BASE_URL]
+    override fun setPreferences(values: Map<String, PrefValue>) {
+        mirror = (values[PREF_BASE_URL] as? PrefValue.Str)?.value
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?.let { normalizeBaseUrl(it) }
@@ -171,17 +181,16 @@ class ZLibrary :
 
     // --- MultiLanguageSource --------------------------------------------------
 
-    override fun availableLanguages(): List<String> = listOf(
-        "English", "Spanish", "Portuguese", "French", "German", "Italian",
-        "Dutch", "Russian", "Ukrainian", "Polish", "Czech", "Romanian",
-        "Greek", "Turkish", "Arabic", "Hebrew", "Hindi", "Bengali",
-        "Chinese", "Japanese", "Korean", "Vietnamese", "Thai", "Indonesian",
-        "Swedish", "Norwegian", "Danish", "Finnish", "Hungarian", "Persian",
+    override suspend fun availableLanguages(): List<Language> = listOf(
+        Language.EN, Language.ES, Language.PT, Language.FR, Language.DE, Language.IT,
+        Language.NL, Language.RU, Language.UK, Language.PL, Language.CS, Language.RO,
+        Language.EL, Language.TR, Language.AR, Language.HE, Language.HI, Language.BN,
+        Language.ZH, Language.JA, Language.KO, Language.VI, Language.TH, Language.ID,
+        Language.SV, Language.NO, Language.DA, Language.FI, Language.HU, Language.FA,
     )
 
-    override fun setEnabledLanguages(languages: Set<String>) {
-        enabledLanguages = languages.map { it.trim().lowercase() }
-            .filter { it.isNotEmpty() }.toSet()
+    override fun setEnabledLanguages(languages: Set<Language>) {
+        enabledLanguages = languages.filter { it != Language.MULTI && it != Language.UNKNOWN }.toSet()
     }
 
     // --- Listings (always EPUB-constrained) -----------------------------------
@@ -191,44 +200,43 @@ class ZLibrary :
     // server-rendered "Most Popular" shelf (single page, no pagination). The
     // page marker lets the parser return an empty second page so the host stops
     // paginating instead of looping the same shelf forever.
-    override fun popularNovelsRequest(page: Int): Request =
-        GET("$baseUrl/?$PAGE_MARKER=$page")
-
-    override fun latestUpdatesRequest(page: Int): Request =
-        GET("$baseUrl/?$PAGE_MARKER=$page")
-
-    // Search is the server-rendered `GET /s/<query>` results page (the same
-    // host serves it; the `/api/search` JSON only exists on the landing
-    // domain). `extensions[]=EPUB` constrains to EPUB; `page` paginates.
-    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
-        val url = baseUrl.toHttpUrlOrNull()!!.newBuilder()
-            .addPathSegment("s")
-            .addPathSegment(query.trim())
-            .addQueryParameter("extensions[]", "EPUB")
-            .apply { if (page > 1) addQueryParameter("page", page.toString()) }
-            .build()
-        return GET(url.toString())
+    // Z-Library has no anonymous "browse all" endpoint, so popular/latest both
+    // read the landing page's "Most Popular" shelf (single page). The page marker
+    // lets the parser return an empty second page so the host stops paginating.
+    override suspend fun getPopularNovels(page: Int): List<Novel> = withContext(Dispatchers.IO) {
+        parseShelf(execute(GET("$baseUrl/?$PAGE_MARKER=$page")))
     }
 
-    override suspend fun popularNovelsParse(response: Response): List<Novel> =
-        parseShelf(response)
+    override suspend fun getLatestUpdates(page: Int): List<Novel> = withContext(Dispatchers.IO) {
+        parseShelf(execute(GET("$baseUrl/?$PAGE_MARKER=$page")))
+    }
 
-    override suspend fun latestUpdatesParse(response: Response): List<Novel> =
-        parseShelf(response)
+    // Search is the server-rendered `GET /s/<query>` results page.
+    // `extensions[]=EPUB` constrains to EPUB; `page` paginates.
+    override suspend fun searchNovels(query: String, page: Int, filters: List<Filter<*>>): List<Novel> =
+        withContext(Dispatchers.IO) {
+            val url = baseUrl.toHttpUrlOrNull()!!.newBuilder()
+                .addPathSegment("s")
+                .addPathSegment(query.trim())
+                .addQueryParameter("extensions[]", "EPUB")
+                .apply { if (page > 1) addQueryParameter("page", page.toString()) }
+                .build()
+            searchNovelsParse(execute(GET(url.toString())))
+        }
 
     // The `/s/` results page renders each hit as a `<z-bookcard>` custom element
     // carrying href/extension/language as attributes, with title/author in
     // `[slot]` children and the (absolute CDN) cover in the nested `<img>`.
-    override suspend fun searchNovelsParse(response: Response): List<Novel> {
+    private fun searchNovelsParse(response: Response): List<Novel> {
         val doc = response.asJsoup()
         return doc.select("z-bookcard").mapNotNull { card ->
             if (!card.attr("extension").equals("epub", ignoreCase = true)) return@mapNotNull null
             val href = card.attr("href").trim().substringBefore('?').takeIf { it.isNotEmpty() }
                 ?: return@mapNotNull null
             // Z-Library's search ignores any language param, so filter client-side.
-            val cardLang = card.attr("language").trim()
-            if (enabledLanguages.isNotEmpty() && cardLang.isNotEmpty() &&
-                cardLang.lowercase() !in enabledLanguages
+            val language = toLanguage(card.attr("language").trim())
+            if (enabledLanguages.isNotEmpty() && language != Language.UNKNOWN &&
+                language !in enabledLanguages
             ) {
                 return@mapNotNull null
             }
@@ -237,17 +245,14 @@ class ZLibrary :
             Novel(
                 url = href,
                 title = title,
+                language = language,
                 author = card.selectFirst("[slot=author]")?.text()?.trim()
                     ?.takeIf { it.isNotEmpty() },
                 thumbnailUrl = card.selectFirst("img")?.imageUrl(response.request.url.toString()),
-                language = cardLang.takeIf { it.isNotEmpty() }
-                    ?.replaceFirstChar { it.uppercase() },
                 status = NovelStatus.COMPLETED,
             )
         }
     }
-
-    override fun getFilterList(): List<Filter<*>> = emptyList()
 
     private fun parseShelf(response: Response): List<Novel> {
         val pageParam = response.request.url.queryParameter(PAGE_MARKER)
@@ -279,6 +284,7 @@ class ZLibrary :
             Novel(
                 url = href,
                 title = title,
+                language = Language.UNKNOWN,
                 author = cover?.attr("author")?.trim()?.takeIf { it.isNotEmpty() } ?: altAuthor,
                 thumbnailUrl = img.imageUrl(response.request.url.toString()),
                 status = NovelStatus.COMPLETED,
@@ -288,7 +294,11 @@ class ZLibrary :
 
     // --- Novel details --------------------------------------------------------
 
-    override suspend fun novelDetailsParse(response: Response): Novel {
+    override suspend fun getNovelDetails(novel: Novel): Novel = withContext(Dispatchers.IO) {
+        novelDetailsParse(execute(GET(resolveUrl(novel.url))))
+    }
+
+    private fun novelDetailsParse(response: Response): Novel {
         val pageUrl = response.request.url.toString()
         val doc = response.asJsoup()
         fun meta(prop: String) =
@@ -304,6 +314,7 @@ class ZLibrary :
             return Novel(
                 url = pageUrl,
                 title = titleFromUrl(pageUrl),
+                language = Language.UNKNOWN,
                 status = NovelStatus.COMPLETED,
                 initialized = true,
             )
@@ -326,29 +337,24 @@ class ZLibrary :
             .map { it.text().trim() }
             .filter { it.isNotEmpty() }
             .distinct()
-        val language = doc.selectFirst(
-            ".property_language .property_value, [itemprop=inLanguage], " +
-                ".bookProperty.property_language .property_value",
-        )?.text()?.trim()?.takeIf { it.isNotEmpty() }
-            ?.replaceFirstChar { it.uppercase() }
+        val language = toLanguage(
+            doc.selectFirst(
+                ".property_language .property_value, [itemprop=inLanguage], " +
+                    ".bookProperty.property_language .property_value",
+            )?.text()?.trim(),
+        )
         return Novel(
             url = response.request.url.toString(),
             title = title,
+            language = language,
             thumbnailUrl = cover,
             author = author,
             description = description,
             genres = genres,
-            language = language,
             status = NovelStatus.COMPLETED,
             initialized = true,
         )
     }
-
-    // --- Not used: content is delivered as a whole-book EPUB ------------------
-
-    override suspend fun chapterListParse(response: Response): List<Chapter> = emptyList()
-
-    override suspend fun pageListParse(response: Response): List<NovelPage> = emptyList()
 
     // --- EpubSource -----------------------------------------------------------
 
@@ -574,6 +580,17 @@ class ZLibrary :
     }
 
     // --- Helpers --------------------------------------------------------------
+
+    private suspend fun execute(request: Request): Response =
+        withContext(Dispatchers.IO) { client.newCall(request).execute() }
+
+    // Map a Z-Library language name (e.g. "English") to a [Language] by its
+    // English display name; unknown / blank -> [Language.UNKNOWN].
+    private fun toLanguage(name: String?): Language {
+        val n = name?.trim()?.takeIf { it.isNotEmpty() } ?: return Language.UNKNOWN
+        return Language.entries.firstOrNull { it.displayName.equals(n, ignoreCase = true) }
+            ?: Language.UNKNOWN
+    }
 
     private fun cookieValue(rawCookies: String, name: String): String? =
         rawCookies.split(';')

@@ -1,17 +1,25 @@
 package io.grimoire.extension.en.royalroad
 
-import io.grimoire.api.model.Chapter
-import io.grimoire.api.model.Filter
-import io.grimoire.api.model.Novel
-import io.grimoire.api.model.NovelPage
-import io.grimoire.api.model.NovelStatus
-import io.grimoire.api.network.HttpSource
-import io.grimoire.api.network.richDescription
-import io.grimoire.api.network.richHtml
+import io.grimoire.api.model.filter.Filter
+import io.grimoire.api.model.lang.Language
+import io.grimoire.api.model.novel.Chapter
+import io.grimoire.api.model.novel.Novel
+import io.grimoire.api.model.novel.NovelPage
+import io.grimoire.api.model.novel.NovelStatus
+import io.grimoire.api.model.novel.PageContent
 import io.grimoire.api.source.SourceInfo
+import io.grimoire.api.source.feature.FilterSource
+import io.grimoire.api.source.feature.LatestSource
+import io.grimoire.api.source.feature.PopularSource
+import io.grimoire.api.source.feature.SearchSource
+import io.grimoire.api.source.http.HttpSource
+import io.grimoire.api.source.web.ChapterListSource
+import io.grimoire.api.source.web.PageListSource
+import io.grimoire.api.util.richDescription
+import io.grimoire.api.util.richHtml
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -21,33 +29,43 @@ import java.time.Instant
 
 @SourceInfo(
     name = "Royal Road",
-    lang = "en",
+    lang = Language.EN,
     baseUrl = "https://www.royalroad.com",
-    versionCode = 2,
+    versionCode = 3,
     novelUpdatesGroups = ["Royal Road"],
 )
-class RoyalRoad : HttpSource() {
+class RoyalRoad :
+    HttpSource(),
+    PopularSource,
+    LatestSource,
+    SearchSource,
+    FilterSource,
+    ChapterListSource,
+    PageListSource {
 
     override val name = "Royal Road"
-    override val lang = "en"
+    override val lang = Language.EN
     override val baseUrl = "https://www.royalroad.com"
 
-    // Listings ---------------------------------------------------------------
-    //
-    // Royal Road has no single "popular" ordering; best-rated is the closest
-    // stable proxy and matches what the site surfaces as its top fictions.
+    // Royal Road has no single "popular" ordering; best-rated is the closest proxy.
+    override suspend fun getPopularNovels(page: Int): List<Novel> = withContext(Dispatchers.IO) {
+        parseFictionListDocument(get("$baseUrl/fictions/best-rated?page=$page").asJsoup())
+    }
 
-    override fun popularNovelsRequest(page: Int): Request =
-        GET("$baseUrl/fictions/best-rated?page=$page")
-
-    override fun latestUpdatesRequest(page: Int): Request =
-        GET("$baseUrl/fictions/latest-updates?page=$page")
+    override suspend fun getLatestUpdates(page: Int): List<Novel> = withContext(Dispatchers.IO) {
+        parseFictionListDocument(get("$baseUrl/fictions/latest-updates?page=$page").asJsoup())
+    }
 
     // The advanced-search endpoint accepts a free-text title together with the
     // full filter set, so search + filters compose in a single request.
     override val supportsSearchWithFilters: Boolean = true
 
-    override fun searchNovelsRequest(query: String, page: Int, filters: List<Filter<*>>): Request {
+    override suspend fun searchNovels(query: String, page: Int, filters: List<Filter<*>>): List<Novel> =
+        withContext(Dispatchers.IO) {
+            parseFictionListDocument(get(searchUrl(query, page, filters)).asJsoup())
+        }
+
+    internal fun searchUrl(query: String, page: Int, filters: List<Filter<*>>): String {
         val url = "$baseUrl/fictions/search".toHttpUrl().newBuilder()
         url.addQueryParameter("globalFilters", "false")
         if (query.isNotBlank()) url.addQueryParameter("title", query.trim())
@@ -67,8 +85,6 @@ class RoyalRoad : HttpSource() {
 
                 is OrderFilter -> url.addQueryParameter("dir", if (filter.state == 1) "asc" else "desc")
 
-                // Tags + content warnings both submit through tagsAdd/tagsRemove;
-                // a tri-state per entry maps INCLUDE -> add, EXCLUDE -> remove.
                 is TagGroup -> filter.state.forEachIndexed { i, child ->
                     val value = filter.tags[i].value
                     when (child.state) {
@@ -88,16 +104,8 @@ class RoyalRoad : HttpSource() {
         }
 
         url.addQueryParameter("page", page.toString())
-        return GET(url.build().toString())
+        return url.build().toString()
     }
-
-    // best-rated / latest-updates / search all render the same fiction-list markup.
-    override suspend fun popularNovelsParse(response: Response): List<Novel> = parseFictionList(response)
-    override suspend fun latestUpdatesParse(response: Response): List<Novel> = parseFictionList(response)
-    override suspend fun searchNovelsParse(response: Response): List<Novel> = parseFictionList(response)
-
-    internal fun parseFictionList(response: Response): List<Novel> =
-        parseFictionListDocument(response.asJsoup())
 
     internal fun parseFictionListDocument(doc: Document): List<Novel> =
         doc.select("div.fiction-list-item").mapNotNull { item ->
@@ -105,14 +113,17 @@ class RoyalRoad : HttpSource() {
             Novel(
                 url = link.attr("href"),
                 title = link.text().trim(),
+                language = lang,
                 thumbnailUrl = item.selectFirst("figure img")?.absUrl("src").cleanCover(),
             )
         }
 
     // Novel details ----------------------------------------------------------
 
-    override suspend fun novelDetailsParse(response: Response): Novel =
-        novelDetailsFromDocument(response.asJsoup(), response.request.url.toString())
+    override suspend fun getNovelDetails(novel: Novel): Novel = withContext(Dispatchers.IO) {
+        val url = resolveUrl(novel.url)
+        novelDetailsFromDocument(get(url).asJsoup(), url)
+    }
 
     internal fun novelDetailsFromDocument(doc: Document, url: String): Novel {
         val statusText = doc.select("div.fiction-info span.label").joinToString(" ") { it.text() }
@@ -120,6 +131,7 @@ class RoyalRoad : HttpSource() {
         return Novel(
             url = url,
             title = doc.selectFirst("div.fic-header h1")?.text()?.trim().orEmpty(),
+            language = lang,
             thumbnailUrl = doc.selectFirst("div.cover-art-container img")?.absUrl("src").cleanCover(),
             author = doc.selectFirst("div.fic-header h4 a")?.text()?.trim()?.takeIf { it.isNotEmpty() },
             description = doc.selectFirst("div.description")?.richDescription()?.takeIf { it.isNotBlank() },
@@ -143,14 +155,14 @@ class RoyalRoad : HttpSource() {
         }.getOrDefault(null to null)
     }
 
-    // Chapter list -----------------------------------------------------------
+    // Chapter list ------------------------------------------------------------
     //
-    // The fiction page embeds the full chapter list as a `window.chapters = [...]`
-    // JSON array — cleaner and more complete than scraping the (paginated) table,
-    // and it carries per-chapter ISO upload dates and the locked/`isUnlocked` flag.
+    // The fiction page embeds the full chapter list as `window.chapters = [...]`
+    // JSON — cleaner than the paginated table, with ISO dates and the locked flag.
 
-    override suspend fun chapterListParse(response: Response): List<Chapter> =
-        chaptersFromHtml(response.body!!.string())
+    override suspend fun getChapterList(novel: Novel): List<Chapter> = withContext(Dispatchers.IO) {
+        chaptersFromHtml(get(resolveUrl(novel.url)).use { it.body!!.string() })
+    }
 
     internal fun chaptersFromHtml(html: String): List<Chapter> {
         val json = CHAPTERS_ARRAY.find(html)?.groupValues?.get(1) ?: return emptyList()
@@ -161,11 +173,7 @@ class RoyalRoad : HttpSource() {
                 url = ch.getString("url"),
                 name = ch.optString("title").trim(),
                 uploadDate = ch.optString("date").toEpochMillis(),
-                // `order` is Royal Road's own 0-based display sequence; +1 gives the
-                // host a stable monotonic number to order and track reading position by.
                 chapterNumber = (ch.optInt("order", i) + 1).toFloat(),
-                // `isUnlocked` is absent/true for free chapters and false for ones
-                // gated behind the author's paid subscription tiers.
                 locked = !ch.optBoolean("isUnlocked", true),
             )
         }
@@ -173,32 +181,31 @@ class RoyalRoad : HttpSource() {
 
     // Chapter content --------------------------------------------------------
 
-    override suspend fun pageListParse(response: Response): List<NovelPage> =
-        pagesFromDocument(response.asJsoup())
+    override suspend fun getPageList(chapter: Chapter): List<NovelPage> = withContext(Dispatchers.IO) {
+        pagesFromDocument(get(resolveUrl(chapter.url)).asJsoup())
+    }
 
     internal fun pagesFromDocument(doc: Document): List<NovelPage> {
         val content = doc.selectFirst("div.chapter-content") ?: return emptyList()
         stripHoneypots(doc, content)
         return content.select("> p, > hr").mapIndexedNotNull { index, el ->
             if (el.tagName().equals("hr", ignoreCase = true)) {
-                return@mapIndexedNotNull NovelPage(index = index, text = "", isSeparator = true)
+                return@mapIndexedNotNull NovelPage(index, PageContent.Separator())
             }
             val imageUrl = el.selectFirst("img")?.imageUrl()
             if (imageUrl != null) {
-                return@mapIndexedNotNull NovelPage(index = index, text = "", imageUrl = imageUrl)
+                return@mapIndexedNotNull NovelPage(index, PageContent.Image(imageUrl))
             }
             val text = el.text().trim()
             if (text.isEmpty()) return@mapIndexedNotNull null
-            NovelPage(index = index, text = text, formattedText = el.richHtml())
+            NovelPage(index, PageContent.Text(text, el.richHtml()))
         }
     }
 
     /**
-     * Royal Road defends against scrapers by injecting honeypot nodes — random-class
-     * `<p>`/`<span>` elements carrying a theft-warning sentence, hidden from readers by
-     * an inline `<style>` rule (`display: none`). Left in, their text bleeds into the
-     * chapter mid-sentence. We collect every class hidden by a stylesheet rule and drop
-     * those nodes from the content before extracting paragraphs.
+     * Royal Road injects honeypot nodes — random-class `<p>`/`<span>` carrying a
+     * theft warning, hidden by an inline `display:none` rule. Collect every class
+     * a stylesheet hides and drop those nodes before extracting paragraphs.
      */
     private fun stripHoneypots(doc: Document, content: Element) {
         val hidden = buildSet {
@@ -209,11 +216,7 @@ class RoyalRoad : HttpSource() {
         hidden.forEach { cls -> content.select(".$cls").remove() }
     }
 
-    // Filters ----------------------------------------------------------------
-    //
-    // Royal Road's tag/status/sort taxonomy is a fixed set baked into the search
-    // form, so it's hardcoded here (no dynamic fetch / "load filters" gate). Tags
-    // and content warnings are tri-state (include -> tagsAdd, exclude -> tagsRemove).
+    // Filters -----------------------------------------------------------------
 
     override fun getFilterList(): List<Filter<*>> = listOf(
         SortByFilter(),
@@ -223,8 +226,6 @@ class RoyalRoad : HttpSource() {
         TagGroup("Genres & Tags", TAGS),
         TagGroup("Content Warnings", CONTENT_WARNINGS),
         Filter.Separator(),
-        // Free-text refinements grouped at the bottom so they don't read like
-        // three stacked search bars above the categorical filters.
         Filter.Header("Advanced"),
         Filter.Text(KEYWORD),
         Filter.Text(AUTHOR),
@@ -238,8 +239,6 @@ class RoyalRoad : HttpSource() {
 
     private class StatusFilter : Filter.Select<String>("Status", STATUS.labels())
     private class TypeFilter : Filter.Select<String>("Type", TYPE.labels())
-    // Sort is two compact dropdowns rather than Filter.Sort, whose always-expanded
-    // 10-row radio list would dominate the sheet and dwarf the other controls.
     private class SortByFilter : Filter.Select<String>("Sort by", ORDER_BY.labels())
     private class OrderFilter : Filter.Select<String>("Order", arrayOf("Descending", "Ascending"))
 
@@ -247,19 +246,16 @@ class RoyalRoad : HttpSource() {
     internal class TagGroup(name: String, val tags: List<Tag>) :
         Filter.Group<Filter.TriState>(name, tags.map { Filter.TriState(it.label) })
 
-    // Helpers ----------------------------------------------------------------
+    // Helpers -----------------------------------------------------------------
 
-    private fun Response.asJsoup(): Document =
+    private fun okhttp3.Response.asJsoup(): Document =
         Jsoup.parse(body!!.string(), request.url.toString())
 
-    // Lazy-loaded chapter images park the real URL in data-src; fall back to src.
     private fun Element.imageUrl(): String? =
         sequenceOf("data-src", "src")
             .map { absUrl(it) }
             .firstOrNull { it.isNotBlank() }
 
-    // The placeholder cover is served via the img's onError handler, but a fiction
-    // genuinely without art already has nocover in `src` — treat it as "no cover".
     private fun String?.cleanCover(): String? =
         this?.takeIf { it.isNotBlank() && !it.contains("nocover", ignoreCase = true) }
 
@@ -276,10 +272,7 @@ class RoyalRoad : HttpSource() {
     }
 
     private companion object {
-        // window.chapters = [ ... ];  — captures the array literal.
         val CHAPTERS_ARRAY = Regex("""window\.chapters\s*=\s*(\[.*?])\s*;""", RegexOption.DOT_MATCHES_ALL)
-
-        // A stylesheet rule of the form `.someClass { ... display: none ... }`.
         val HIDDEN_RULE = Regex("""\.([A-Za-z0-9_-]+)\s*\{[^}]*?display\s*:\s*none""", RegexOption.IGNORE_CASE)
     }
 }
@@ -290,7 +283,6 @@ private data class Opt(val param: String, val label: String)
 
 private fun List<Opt>.labels(): Array<String> = map { it.label }.toTypedArray()
 
-// Free-text filter labels and the search params they map to.
 private const val KEYWORD = "Keyword (searches content)"
 private const val AUTHOR = "Author"
 private const val MIN_PAGES = "Min pages"
@@ -307,7 +299,6 @@ private val TEXT_PARAMS = mapOf(
     MAX_RATING to "maxRating",
 )
 
-// First entry ("All"/index 0) is the no-op default; param "ALL" is dropped.
 private val STATUS = listOf(
     Opt("ALL", "All"),
     Opt("ONGOING", "Ongoing"),
@@ -346,8 +337,6 @@ private val CONTENT_WARNINGS = listOf(
     RoyalRoad.Tag("ai_generated", "AI-Generated Content"),
 )
 
-// The full genre/tag list from the advanced-search form. Stable enough to
-// hardcode; a new tag is a one-line addition + version bump.
 private val TAGS = listOf(
     RoyalRoad.Tag("anti-hero_lead", "Anti-Hero Lead"),
     RoyalRoad.Tag("antivillain_lead", "Anti-Villain Lead"),
