@@ -1,5 +1,6 @@
 package io.grimoire.extension.en.caleredhair
 
+import io.grimoire.api.model.lang.Language
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.extensions.lib.theme.PatreonSource
 
@@ -10,7 +11,7 @@ import io.grimoire.extensions.lib.theme.PatreonSource
  */
 @SourceInfo(
     name = "Cale",
-    lang = "en",
+    lang = Language.EN,
     baseUrl = "https://www.patreon.com",
     versionCode = 2,
     novelUpdatesGroups = ["Cale Red Hair"],
@@ -18,7 +19,7 @@ import io.grimoire.extensions.lib.theme.PatreonSource
 class Caleredhair : PatreonSource() {
 
     override val name = "Cale"
-    override val lang = "en"
+    override val lang = Language.EN
 
     override val campaignId = "13760222"
 }
