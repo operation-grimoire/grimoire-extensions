@@ -10,8 +10,8 @@ android {
         applicationId = "io.grimoire.extension.en.foxaholic"
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.0.11"
+        versionCode = 13
+        versionName = "1.0.12"
     }
 
     compileOptions {

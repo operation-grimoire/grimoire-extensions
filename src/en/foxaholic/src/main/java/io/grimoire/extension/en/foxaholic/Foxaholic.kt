@@ -6,7 +6,6 @@ import io.grimoire.api.model.novel.Novel
 import io.grimoire.api.model.novel.NovelPage
 import io.grimoire.api.model.novel.NovelStatus
 import io.grimoire.api.model.novel.PageContent
-import io.grimoire.api.source.AdultContent
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.util.richHtml
 import io.grimoire.extensions.lib.theme.WPNovelsSource
@@ -22,9 +21,8 @@ import java.util.Locale
     name = "Foxaholic",
     lang = Language.EN,
     baseUrl = "https://www.foxaholic.com",
-    versionCode = 11,
+    versionCode = 13,
     novelUpdatesGroups = ["Foxaholic"],
-    adultContent = AdultContent.PARTIAL,
 )
 class Foxaholic : WPNovelsSource() {
     override val name = "Foxaholic"
