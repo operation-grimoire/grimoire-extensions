@@ -5,13 +5,11 @@ import io.grimoire.api.model.filter.Filter
 import io.grimoire.api.model.lang.Language
 import io.grimoire.api.model.novel.Novel
 import io.grimoire.api.model.novel.NovelStatus
-import io.grimoire.api.model.pref.ConfigValidationResult
-import io.grimoire.api.model.pref.PrefValue
-import io.grimoire.api.model.pref.SourcePreference
+import io.grimoire.api.network.failoverClient
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.source.epub.EpubSource
-import io.grimoire.api.source.feature.ConfigurableSource
 import io.grimoire.api.source.feature.LatestSource
+import io.grimoire.api.source.feature.MultiHostSource
 import io.grimoire.api.source.feature.MultiLanguageSource
 import io.grimoire.api.source.feature.PopularSource
 import io.grimoire.api.source.feature.SearchSource
@@ -21,6 +19,7 @@ import io.grimoire.api.util.richDescription
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
@@ -33,15 +32,14 @@ import java.io.IOException
  * host app reads here): every search is constrained to `extensions[]=EPUB` and
  * non-EPUB results are skipped defensively.
  *
- * Everything runs against a single host (default `z-library.im`): the homepage
- * renders the "Most Popular" shelf, `GET /s/<query>` serves search results as
- * `<z-bookcard>` HTML, and `/book/…` + `/dl/…` serve details and downloads.
- * (An earlier split routed search through the `z-library.bz` landing domain's
- * `POST /api/search` JSON, but that endpoint 404s on the per-user mirror while
- * `/s/` is served everywhere — so one host now covers all of it.) Books are
- * whole-book EPUB files, so this is an [EpubSource]: the host downloads the
- * bytes via [getEpub] and parses them locally; [chapterListParse] /
- * [pageListParse] are intentionally empty.
+ * The active mirror host serves everything: the homepage renders the "Most
+ * Popular" shelf, `GET /s/<query>` serves search results as `<z-bookcard>` HTML,
+ * and `/book/…` + `/dl/…` serve details and downloads. (An earlier split routed
+ * search through the `z-library.bz` landing domain's `POST /api/search` JSON, but
+ * that endpoint 404s on the per-user mirror while `/s/` is served everywhere — so
+ * one host now covers all of it.) Books are whole-book EPUB files, so this is an
+ * [EpubSource]: the host downloads the bytes via [getEpub] and parses them
+ * locally; [chapterListParse] / [pageListParse] are intentionally empty.
  *
  * Downloads work anonymously within Z-Library's daily quota; signing in raises
  * or removes that limit. Login is delegated to a WebView ([WebViewLoginSource]):
@@ -49,8 +47,11 @@ import java.io.IOException
  * also clears Cloudflare), and the resulting session cookies are replayed on
  * this source's OkHttp requests — no credentials are stored by the extension.
  *
- * Note: Z-Library rotates mirror domains and tweaks its markup, so the host is
- * a user-editable preference, and shelf/search parsing, download-link
+ * Z-Library rotates mirror domains, so this is a [MultiHostSource] over a fixed
+ * list of known-equivalent mirrors ([DEFAULT_MIRRORS]); the app picks the active
+ * one and the shared host-failover client ([failoverClient]) transparently
+ * rotates listing requests to the next mirror when one is down. Shelf/search
+ * parsing, download-link
  * resolution and login are each isolated below so they can be adjusted against
  * live responses without touching the rest of the source.
  */
@@ -58,27 +59,23 @@ import java.io.IOException
     name = "Z-Library",
     lang = Language.MULTI,
     baseUrl = "https://z-library.im",
-    versionCode = 26,
+    versionCode = 30,
 )
 class ZLibrary :
     HttpSource(),
     PopularSource,
     LatestSource,
     SearchSource,
-    ConfigurableSource,
     EpubSource,
     MultiLanguageSource,
+    MultiHostSource,
     WebViewLoginSource {
 
     override val name = "Z-Library"
     override val lang = Language.MULTI
 
-    // Single host for everything (shelf, /s/ search, /book details, /dl
-    // downloads, /login). Z-Library rotates mirrors, so this is user-editable.
-    private val defaultMirror = "https://z-library.im"
-
     @Volatile
-    private var mirror: String = defaultMirror
+    private var activeHostBacking: String = DEFAULT_MIRRORS.first()
 
     // Enabled content languages. Empty = no filter. Z-Library's search ignores
     // any language parameter (verified), so this is applied client-side by
@@ -86,45 +83,30 @@ class ZLibrary :
     @Volatile
     private var enabledLanguages: Set<Language> = emptySet()
 
-    override val baseUrl: String
-        get() = mirror
+    // --- MultiHostSource ------------------------------------------------------
 
-    // --- ConfigurableSource (mirror domain only — login is via WebView) -------
+    override val hosts: List<String>
+        get() = DEFAULT_MIRRORS
 
-    override fun getPreferences(): List<SourcePreference> = listOf(
-        SourcePreference.EditText(
-            key = PREF_BASE_URL,
-            title = "Mirror domain",
-            summary = "Z-Library host used for everything — browsing, search, " +
-                "sign-in and downloads (default z-library.im). Change it if the " +
-                "default mirror is blocked.",
-            default = defaultMirror,
-        ),
-    )
+    override val activeHost: String
+        get() = activeHostBacking
 
-    override fun setPreferences(values: Map<String, PrefValue>) {
-        mirror = (values[PREF_BASE_URL] as? PrefValue.Str)?.value
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
+    override fun setActiveHost(host: String) {
+        activeHostBacking = host.trim().takeIf { it.isNotEmpty() }
             ?.let { normalizeBaseUrl(it) }
-            ?: defaultMirror
+            ?: hosts.first()
     }
 
-    override suspend fun validateConfiguration(): ConfigValidationResult =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                client.newCall(GET(baseUrl)).execute().use { it.isSuccessful }
-            }.getOrDefault(false).let { ok ->
-                if (ok) {
-                    ConfigValidationResult(true, "Reached Z-Library at $baseUrl.")
-                } else {
-                    ConfigValidationResult(
-                        false,
-                        "Couldn't reach $baseUrl — check the mirror domain.",
-                    )
-                }
-            }
-        }
+    // Everything is built relative to the active host: the shelf, /s/ search,
+    // /book details, /dl downloads and /login all live on it.
+    override val baseUrl: String
+        get() = activeHostBacking
+
+    // Only the listing endpoints (homepage shelf and `/s/` search) fail over;
+    // book pages, the `/dl` download chain and `/login` are host-bound.
+    override val client: OkHttpClient = failoverClient(
+        rotatable = { it.encodedPath == "/" || it.encodedPath.startsWith("/s/") },
+    )
 
     // --- WebViewLoginSource ---------------------------------------------------
 
@@ -644,8 +626,17 @@ class ZLibrary :
     }
 
     companion object {
-        private const val PREF_BASE_URL = "base_url"
         private const val PAGE_MARKER = "zlpage"
+
+        // Mirror hosts tried in order; an optional user-set mirror is prepended.
+        // Z-Library rotates domains, so several known-equivalent mirrors are kept.
+        private val DEFAULT_MIRRORS = listOf(
+            "https://z-library.im",
+            "https://z-lib.sk",
+            "https://z-library.sk",
+            "https://z-lib.fm",
+            "https://z-lib.gd",
+        )
         private const val COOKIE_EXPIRY =
             "Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/"
         private const val MAX_RETRIES = 3
