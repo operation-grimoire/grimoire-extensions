@@ -8,7 +8,6 @@ import io.grimoire.api.model.novel.NovelStatus
 import io.grimoire.api.network.failoverClient
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.source.epub.EpubSource
-import io.grimoire.api.source.feature.LatestSource
 import io.grimoire.api.source.feature.MultiHostSource
 import io.grimoire.api.source.feature.MultiLanguageSource
 import io.grimoire.api.source.feature.PopularSource
@@ -59,12 +58,11 @@ import java.io.IOException
     name = "Z-Library",
     lang = Language.MULTI,
     baseUrl = "https://z-library.im",
-    versionCode = 30,
+    versionCode = 31,
 )
 class ZLibrary :
     HttpSource(),
     PopularSource,
-    LatestSource,
     SearchSource,
     EpubSource,
     MultiLanguageSource,
@@ -177,19 +175,13 @@ class ZLibrary :
 
     // --- Listings (always EPUB-constrained) -----------------------------------
 
-    // Z-Library has no anonymous "browse all" endpoint and the search API
-    // rejects an empty query, so popular/latest both read the landing page's
-    // server-rendered "Most Popular" shelf (single page, no pagination). The
-    // page marker lets the parser return an empty second page so the host stops
-    // paginating instead of looping the same shelf forever.
-    // Z-Library has no anonymous "browse all" endpoint, so popular/latest both
-    // read the landing page's "Most Popular" shelf (single page). The page marker
-    // lets the parser return an empty second page so the host stops paginating.
+    // Z-Library has no anonymous "browse all" endpoint and the search API rejects
+    // an empty query, so Popular reads the landing page's server-rendered "Most
+    // Popular" shelf (single page, no pagination). The page marker lets the parser
+    // return an empty second page so the host stops paginating instead of looping
+    // the same shelf forever. There is no anonymous "recently added" feed, so the
+    // source does not implement LatestSource (no fake Latest tab).
     override suspend fun getPopularNovels(page: Int): List<Novel> = withContext(Dispatchers.IO) {
-        parseShelf(execute(GET("$baseUrl/?$PAGE_MARKER=$page")))
-    }
-
-    override suspend fun getLatestUpdates(page: Int): List<Novel> = withContext(Dispatchers.IO) {
         parseShelf(execute(GET("$baseUrl/?$PAGE_MARKER=$page")))
     }
 
