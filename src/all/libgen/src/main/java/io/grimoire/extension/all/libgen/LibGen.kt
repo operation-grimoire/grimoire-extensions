@@ -11,10 +11,8 @@ import io.grimoire.api.network.failoverClient
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.source.epub.EpubSource
 import io.grimoire.api.source.feature.ConfigurableSource
-import io.grimoire.api.source.feature.LatestSource
 import io.grimoire.api.source.feature.MultiHostSource
 import io.grimoire.api.source.feature.MultiLanguageSource
-import io.grimoire.api.source.feature.PopularSource
 import io.grimoire.api.source.feature.SearchSource
 import io.grimoire.api.source.http.HttpSource
 import kotlinx.coroutines.Dispatchers
@@ -42,12 +40,10 @@ import java.io.IOException
     name = "Library Genesis",
     lang = Language.MULTI,
     baseUrl = "https://libgen.la",
-    versionCode = 5,
+    versionCode = 6,
 )
 class LibGen :
     HttpSource(),
-    PopularSource,
-    LatestSource,
     SearchSource,
     ConfigurableSource,
     EpubSource,
@@ -149,16 +145,9 @@ class LibGen :
 
     // --- Listings (always EPUB-constrained) -----------------------------------
 
-    // popular/latest have no metric on this fork, so they browse all EPUBs
-    // (a bare `ext:epub` query) restricted to the enabled languages.
-    override suspend fun getPopularNovels(page: Int): List<Novel> = withContext(Dispatchers.IO) {
-        parseResults(execute(searchUrl("", page)))
-    }
-
-    override suspend fun getLatestUpdates(page: Int): List<Novel> = withContext(Dispatchers.IO) {
-        parseResults(execute(searchUrl("", page)))
-    }
-
+    // This fork exposes no popularity or recency metric, so the source offers
+    // only Search (no fake Popular/Latest tabs that would just echo a seeded
+    // browse).
     override suspend fun searchNovels(query: String, page: Int, filters: List<Filter<*>>): List<Novel> =
         withContext(Dispatchers.IO) {
             parseResults(execute(searchUrl(query.trim(), page)))
