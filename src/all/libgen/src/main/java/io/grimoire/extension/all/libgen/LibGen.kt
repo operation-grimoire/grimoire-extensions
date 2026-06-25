@@ -7,7 +7,7 @@ import io.grimoire.api.model.novel.NovelStatus
 import io.grimoire.api.model.pref.ConfigValidationResult
 import io.grimoire.api.model.pref.PrefValue
 import io.grimoire.api.model.pref.SourcePreference
-import io.grimoire.api.network.defaultOkHttpClient
+import io.grimoire.api.network.failoverClient
 import io.grimoire.api.source.SourceInfo
 import io.grimoire.api.source.epub.EpubSource
 import io.grimoire.api.source.feature.ConfigurableSource
@@ -20,7 +20,6 @@ import io.grimoire.api.source.http.HttpSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -43,7 +42,7 @@ import java.io.IOException
     name = "Library Genesis",
     lang = Language.MULTI,
     baseUrl = "https://libgen.la",
-    versionCode = 4,
+    versionCode = 5,
 )
 class LibGen :
     HttpSource(),
@@ -89,9 +88,18 @@ class LibGen :
     override val baseUrl: String
         get() = activeHostBacking
 
-    override val client: OkHttpClient = defaultOkHttpClient().newBuilder()
-        .addInterceptor(HostFailoverInterceptor())
-        .build()
+    // Page requests (index.php listings / edition.php details) fail over across
+    // mirrors; per-file requests (covers, the key-bound download chain) stay on
+    // their host. Every mirror request carries a same-host Referer, and a 200
+    // listing with no results is treated as a dead mirror and retried elsewhere.
+    override val client: OkHttpClient = failoverClient(
+        rotatable = { it.encodedPath.endsWith("/index.php") || it.encodedPath.endsWith("/edition.php") },
+        addReferer = true,
+        accept = { resp ->
+            !resp.request.url.encodedPath.endsWith("/index.php") ||
+                "edition.php" in resp.peekBody(PEEK_BYTES).string()
+        },
+    )
 
     // --- ConfigurableSource ---------------------------------------------------
 
@@ -340,59 +348,6 @@ class LibGen :
         return null
     }
 
-    // --- Host failover --------------------------------------------------------
-
-    // Adds a same-host Referer to every mirror request and rotates *page* requests
-    // (index.php / edition.php) across the mirror list on a connection error, 5xx,
-    // or an empty listing. Per-file requests (covers, the key-bound download chain)
-    // are tied to one host, so they only get the Referer and never rotate.
-    private inner class HostFailoverInterceptor : Interceptor {
-        override fun intercept(chain: Interceptor.Chain): Response {
-            val original = chain.request()
-            val tryHosts = hosts.mapNotNull { it.toHttpUrlOrNull() }
-            val knownHosts = tryHosts.map { it.host }.toSet()
-            if (original.url.host !in knownHosts) return chain.proceed(original)
-
-            val path = original.url.encodedPath
-            val isPage = path.endsWith("/index.php") || path.endsWith("/edition.php")
-            if (!isPage) {
-                return chain.proceed(original.withReferer(original.url.scheme, original.url.host))
-            }
-
-            val isListing = path.endsWith("/index.php")
-
-            val ordered = (listOf(activeHost.toHttpUrlOrNull()).filterNotNull() + tryHosts)
-                .distinctBy { it.host }
-            var lastError: IOException? = null
-            for ((index, host) in ordered.withIndex()) {
-                val rewritten = original.newBuilder()
-                    .url(original.url.newBuilder().scheme(host.scheme).host(host.host).build())
-                    .build()
-                    .withReferer(host.scheme, host.host)
-                try {
-                    val resp = chain.proceed(rewritten)
-                    if (resp.code < 500) {
-                        val lastHost = index == ordered.lastIndex
-                        if (isListing && resp.isSuccessful && !lastHost &&
-                            "edition.php" !in resp.peekBody(PEEK_BYTES).string()
-                        ) {
-                            resp.close()
-                            lastError = IOException("empty results from ${host.host}")
-                            continue
-                        }
-                        activeHostBacking = "${host.scheme}://${host.host}"
-                        return resp
-                    }
-                    resp.close()
-                    lastError = IOException("HTTP ${resp.code} from ${host.host}")
-                } catch (e: IOException) {
-                    lastError = e
-                }
-            }
-            throw lastError ?: IOException("All LibGen mirrors are unreachable")
-        }
-    }
-
     // --- Helpers --------------------------------------------------------------
 
     private suspend fun execute(request: Request): Response =
@@ -405,10 +360,6 @@ class LibGen :
         return Language.entries.firstOrNull { it.displayName.equals(n, ignoreCase = true) }
             ?: Language.UNKNOWN
     }
-
-    private fun Request.withReferer(scheme: String, host: String): Request =
-        if (header("Referer") != null) this
-        else newBuilder().header("Referer", "$scheme://$host/").build()
 
     private fun appendMd5(url: String, md5: String): String {
         val base = url.toHttpUrlOrNull() ?: return url
